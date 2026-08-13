@@ -73,23 +73,43 @@ async def get_download_link(channel_msg_id):
     client = TelegramClient('beam_session', API_ID, API_HASH)
     await client.start()
     
-    await client.forward_messages(
-        entity=AV_F2L_BOT_USERNAME,
-        messages=int(channel_msg_id),  # Force integer
-        from_peer=PRIVATE_CHANNEL_ID
-    )
-    
     future = asyncio.Future()
+    
+    # 1. Listen FIRST
     @client.on(events.NewMessage(from_users=AV_F2L_BOT_USERNAME))
     async def handler(event):
         if not future.done():
             future.set_result(event.message)
             
     try:
+        # 2. Forward SECOND
+        await client.forward_messages(
+            entity=AV_F2L_BOT_USERNAME,
+            messages=int(channel_msg_id),
+            from_peer=PRIVATE_CHANNEL_ID
+        )
+        
+        # 3. Wait for reply
         reply_msg = await asyncio.wait_for(future, timeout=60.0)
-        match = re.search(r'📥.*?:\s*`(https?://\S+)`', reply_msg.text)
-        if match:
-            return match.group(1)
+        text = reply_msg.raw_text or ""
+        
+        # Extract all URLs from text
+        links = re.findall(r'(https?://\S+)', text)
+        for l in links:
+            # Return the download link (avoid /watch/ stream link if possible)
+            if '/watch/' not in l:
+                return l
+                
+        # If only stream links found, return the first one
+        if links:
+            return links[0]
+            
+        # Fallback to buttons
+        if reply_msg.buttons:
+            for row in reply_msg.buttons:
+                for btn in row:
+                    if btn.url:
+                        return btn.url
         return None
     except asyncio.TimeoutError:
         return None
@@ -145,15 +165,12 @@ async def main():
         if not declared_langs:
             declared_langs = ["Unknown"]
             
-        # Extract base quality (e.g. "1080p" from "1080p WEB-DL")
         q_match = re.search(r'(2160p|1080p|720p|480p|360p)', raw_quality, re.IGNORECASE)
         base_quality = q_match.group(1).lower() if q_match else raw_quality.lower()
         
-        # Determine which links table to check
         links_table = "movie_links" if content_type == "movie" else "episode_links"
         id_column = "movie_id" if content_type == "movie" else "episode_id"
         
-        # Check what languages are ALREADY done for this file's base quality
         existing_links = turso_query_all(
             f"SELECT audio_languages FROM {links_table} WHERE {id_column} = ? AND quality = ?",
             [content_id, base_quality]
