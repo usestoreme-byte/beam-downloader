@@ -33,6 +33,7 @@ jobs:
           git config --global --add safe.directory "*"
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add state.json folders.json 2>/dev/null || true
+          git add state.json || true
+          git add folders.json || true
           git commit -m "Update state [skip ci]" || echo "No changes to commit"
           git push || echo "No changes to push"
