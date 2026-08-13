@@ -1,0 +1,46 @@
+name: BEAM Pipeline
+
+on:
+  workflow_dispatch: # This allows you to click a button to run it manually
+  # schedule:
+  #   - cron: '0 */6 * * *' # We will enable this timer later once testing is done
+
+concurrency:
+  group: beam-pipeline-group
+  cancel-in-progress: false # Prevents overlapping runs
+
+permissions:
+  contents: write # Needed so the script can save the state.json file back to the repo
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install telethon requests
+
+      - name: Run Pipeline Script
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION_BASE64: ${{ secrets.TG_SESSION_BASE64 }}
+        run: python beam_pipeline.py
+
+      - name: Commit Checkpoint
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add state.json || true
+          git commit -m "Update checkpoint [skip ci]" || echo "No changes to commit"
+          git push || echo "No changes to push"
