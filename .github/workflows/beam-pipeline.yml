@@ -1,16 +1,14 @@
 name: BEAM Pipeline
 
 on:
-  workflow_dispatch: # This allows you to click a button to run it manually
-  # schedule:
-  #   - cron: '0 */6 * * *' # We will enable this timer later once testing is done
+  workflow_dispatch:
 
 concurrency:
   group: beam-pipeline-group
-  cancel-in-progress: false # Prevents overlapping runs
+  cancel-in-progress: false
 
 permissions:
-  contents: write # Needed so the script can save the state.json file back to the repo
+  contents: write
 
 jobs:
   run-pipeline:
@@ -24,9 +22,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
-          pip install telethon requests
+          sudo apt-get update
+          sudo apt-get install -y aria2 ffmpeg mkvtoolnix tesseract-ocr mediainfo
+
+      - name: Install Python dependencies
+        run: |
+          pip install telethon requests requests-toolbelt pymediainfo pgsrip
 
       - name: Run Pipeline Script
         env:
@@ -35,6 +38,7 @@ jobs:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION_BASE64: ${{ secrets.TG_SESSION_BASE64 }}
+          VIDARA_API_KEY: ${{ secrets.VIDARA_API_KEY }}
         run: python beam_pipeline.py
 
       - name: Commit Checkpoint
