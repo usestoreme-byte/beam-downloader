@@ -25,7 +25,6 @@ SESSION_BASE64 = os.environ.get("TG_SESSION_BASE64")
 
 PRIVATE_CHANNEL_ID = -1003998322386
 
-# Bots
 F2L_BOT_USERNAME = 'AV_F2L_BOT'
 LCU_BOT_USERNAME = 'LCU_Filetolinkbot'
 LINK_STREAMER_BOT = 'linkstreamerbot'
@@ -112,20 +111,15 @@ def decode_session():
             f.write(base64.b64decode(SESSION_BASE64))
 
 async def wait_for_bot_reply(client, bot_username, target_regex, timeout=90):
-    """Smart listener that ignores loading messages and waits for the specific link."""
     future = asyncio.Future()
     
     @client.on(events.NewMessage(from_users=bot_username))
     async def handler(event):
         msg = event.message
         text = msg.raw_text or ""
-        
-        # Check if text contains our target link
         if re.search(target_regex, text):
             if not future.done(): future.set_result(msg)
             return
-            
-        # Check if buttons contain our target link
         if msg.buttons:
             for row in msg.buttons:
                 for btn in row:
@@ -142,10 +136,8 @@ async def wait_for_bot_reply(client, bot_username, target_regex, timeout=90):
         client.remove_event_handler(handler)
 
 async def get_download_link_f2l(client, channel_msg_id):
-    """Primary 1-step bot: AV_F2L_BOT"""
     try:
         await client.forward_messages(entity=F2L_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
-        # Wait for a message containing a worker.dev link
         reply_msg = await wait_for_bot_reply(client, F2L_BOT_USERNAME, r'av-f2l-bot\.avbotz26\.workers\.dev', timeout=60)
         if not reply_msg: return None
         
@@ -165,16 +157,13 @@ async def get_download_link_f2l(client, channel_msg_id):
         return None
 
 async def get_download_link_lcu(client, channel_msg_id):
-    """Fallback 2-step bot: LCU -> linkstreamer"""
     try:
-        # Step 1: Forward to LCU and wait for player2 link
         await client.forward_messages(entity=LCU_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
         reply1 = await wait_for_bot_reply(client, LCU_BOT_USERNAME, r'player2\.mrfooll\.xyz', timeout=60)
         if not reply1:
             print("  LCU did not provide a player link.")
             return None
             
-        # Extract player link
         text1 = reply1.raw_text or ""
         links1 = re.findall(r'(https?://player2\.mrfooll\.xyz[^\s`\'"]+)', text1)
         player_link = links1[0] if links1 else None
@@ -190,7 +179,6 @@ async def get_download_link_lcu(client, channel_msg_id):
         if not player_link: return None
         print(f"  LCU Player Link: {player_link}")
         
-        # Step 2: Send to linkstreamerbot and wait for streamapi link
         await client.send_message(LINK_STREAMER_BOT, player_link)
         reply2 = await wait_for_bot_reply(client, LINK_STREAMER_BOT, r'streamapi\.mrfooll\.xyz', timeout=90)
         if not reply2:
