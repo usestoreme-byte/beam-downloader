@@ -210,7 +210,7 @@ async def get_download_link(client, channel_msg_id):
     return link
 
 # ============================================================================
-# STATE FILES (IMMEDIATE GIT PUSH)
+# STATE FILES (IMMEDIATE GIT PUSH - BULLETPROOF)
 # ============================================================================
 def get_checkpoint():
     if not os.path.exists(CHECKPOINT_FILE): return 0
@@ -219,23 +219,32 @@ def get_checkpoint():
 def save_checkpoint(last_id):
     with open(CHECKPOINT_FILE, 'w') as f: json.dump({"last_id": last_id}, f)
     try:
-        subprocess.run("git config user.name 'GitHub Actions'", shell=True, check=True)
-        subprocess.run("git config user.email 'actions@github.com'", shell=True, check=True)
-        subprocess.run(f"git add {CHECKPOINT_FILE}", shell=True, check=True)
+        repo_dir = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+        env = os.environ.copy()
+        env["GIT_AUTHOR_NAME"] = "GitHub Actions"
+        env["GIT_AUTHOR_EMAIL"] = "actions@github.com"
+        env["GIT_COMMITTER_NAME"] = "GitHub Actions"
+        env["GIT_COMMITTER_EMAIL"] = "actions@github.com"
         
-        # Commit. If it returns non-zero, it means nothing changed.
-        commit_proc = subprocess.run(f'git commit -m "Checkpoint {last_id} [skip ci]"', shell=True)
+        # Fix Docker git ownership error
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", repo_dir], env=env, check=True)
+        
+        subprocess.run(["git", "add", CHECKPOINT_FILE], cwd=repo_dir, env=env, check=True)
+        
+        commit_proc = subprocess.run(
+            ["git", "commit", "-m", f"Checkpoint {last_id} [skip ci]"],
+            cwd=repo_dir, env=env
+        )
         
         if commit_proc.returncode == 0:
-            # Push. We use shell=True to allow the push to execute.
-            push_proc = subprocess.run("git push", shell=True)
+            push_proc = subprocess.run(["git", "push"], cwd=repo_dir, env=env)
             if push_proc.returncode == 0:
                 print(f"  [STATE] Pushed checkpoint {last_id} to GitHub immediately.")
             else:
-                print(f"  [WARN] Git push failed. Check logs above.")
+                print("  [WARN] Git push failed.")
         else:
             print(f"  [STATE] No changes to commit for {last_id}.")
-    except subprocess.CalledProcessError as e:
+    except Exception as e:
         print(f"  [WARN] Failed to push checkpoint immediately: {e}")
 
 def get_or_create_vidara_folder(series_name, season_num, quality):
