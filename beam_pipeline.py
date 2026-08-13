@@ -219,13 +219,23 @@ def get_checkpoint():
 def save_checkpoint(last_id):
     with open(CHECKPOINT_FILE, 'w') as f: json.dump({"last_id": last_id}, f)
     try:
-        subprocess.run(["git", "config", "user.name", "GitHub Actions"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "config", "user.email", "actions@github.com"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "add", CHECKPOINT_FILE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "commit", "-m", f"Checkpoint {last_id} [skip ci]"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "push"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"  [STATE] Pushed checkpoint {last_id} to GitHub immediately.")
-    except Exception as e:
+        subprocess.run("git config user.name 'GitHub Actions'", shell=True, check=True)
+        subprocess.run("git config user.email 'actions@github.com'", shell=True, check=True)
+        subprocess.run(f"git add {CHECKPOINT_FILE}", shell=True, check=True)
+        
+        # Commit. If it returns non-zero, it means nothing changed.
+        commit_proc = subprocess.run(f'git commit -m "Checkpoint {last_id} [skip ci]"', shell=True)
+        
+        if commit_proc.returncode == 0:
+            # Push. We use shell=True to allow the push to execute.
+            push_proc = subprocess.run("git push", shell=True)
+            if push_proc.returncode == 0:
+                print(f"  [STATE] Pushed checkpoint {last_id} to GitHub immediately.")
+            else:
+                print(f"  [WARN] Git push failed. Check logs above.")
+        else:
+            print(f"  [STATE] No changes to commit for {last_id}.")
+    except subprocess.CalledProcessError as e:
         print(f"  [WARN] Failed to push checkpoint immediately: {e}")
 
 def get_or_create_vidara_folder(series_name, season_num, quality):
@@ -559,6 +569,7 @@ async def process_row(client, row):
     all_existing_links = turso_query_all(f"SELECT quality, audio_languages FROM {links_table} WHERE {id_column} = ?", [content_id])
     done_langs = set()
     
+    print(f"\n*** PROCESSING: {file_name} ***")
     print(f"  [DEBUG] Base Quality parsed as: '{base_quality}'")
     for link_row in all_existing_links:
         db_q = (link_row.get("quality") or "").lower()
@@ -570,6 +581,22 @@ async def process_row(client, row):
                 done_langs.add(l)
             
     print(f"  Already Done: {list(done_langs)}")
+    
+    # Get declared languages from download_files
+    declared_langs = json.loads(row["audio_languages"] or "[]")
+    if not declared_langs:
+        declared_langs = ["Unknown"]
+        
+    # Calculate what is actually missing
+    missing_langs = [l for l in declared_langs if l not in done_langs]
+    
+    # --- THE FIXED SKIP LOGIC ---
+    if not missing_langs:
+        print(f"  All declared languages already done. Skipping bot & download.")
+        save_checkpoint(df_id)
+        return
+        
+    print(f"  Missing Languages: {missing_langs}")
     
     link = await get_download_link(client, channel_msg_id)
     if not link:
