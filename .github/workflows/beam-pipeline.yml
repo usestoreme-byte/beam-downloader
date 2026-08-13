@@ -41,10 +41,10 @@ jobs:
           VIDARA_API_KEY: ${{ secrets.VIDARA_API_KEY }}
         run: python beam_pipeline.py
 
-      - name: Commit Checkpoint
+      - name: Commit State Files
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add state.json || true
-          git commit -m "Update checkpoint [skip ci]" || echo "No changes to commit"
+          git add state.json folders.json || true
+          git commit -m "Update state [skip ci]" || echo "No changes to commit"
           git push || echo "No changes to push"
