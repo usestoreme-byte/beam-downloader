@@ -20,6 +20,7 @@ jobs:
 
       - name: Run Pipeline Script
         env:
+          PYTHONUNBUFFERED: 1  # <-- THIS IS THE LINE THAT MAKES LOGS LIVE
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
           TG_API_ID: ${{ secrets.TG_API_ID }}
