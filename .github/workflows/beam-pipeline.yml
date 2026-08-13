@@ -18,21 +18,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Pipeline Script
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_SESSION_BASE64: ${{ secrets.TG_SESSION_BASE64 }}
-          VIDARA_API_KEY: ${{ secrets.VIDARA_API_KEY }}
-        run: python beam_pipeline.py
-
       - name: Commit State Files
         run: |
+          git config --global --add safe.directory "*"
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add state.json || true
           git add folders.json || true
           git commit -m "Update state [skip ci]" || echo "No changes to commit"
           git push || echo "No changes to push"
+
+      
