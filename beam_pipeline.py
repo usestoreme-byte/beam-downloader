@@ -148,6 +148,14 @@ async def get_download_link_lcu(client, channel_msg_id):
         await client.forward_messages(entity=LCU_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
         reply1 = await asyncio.wait_for(future1, timeout=60.0)
         text1 = reply1.raw_text or ""
+        
+        print(f"  [DEBUG] LCU Reply: {text1}")
+        if reply1.buttons:
+            for row in reply1.buttons:
+                for btn in row:
+                    if btn.url:
+                        print(f"  [DEBUG] LCU Button: {btn.text} -> {btn.url}")
+        
         links1 = re.findall(r'(https?://[^\s`\'"]+)', text1)
         player_link = None
         for l in links1:
@@ -161,8 +169,15 @@ async def get_download_link_lcu(client, channel_msg_id):
                         player_link = btn.url
                         break
                 if player_link: break
-        if not player_link: return None
+                
+        if not player_link:
+            print("  LCU did not provide a mrfooll.xyz link.")
+            return None
+            
+        print(f"  LCU Player Link: {player_link}")
+        
     except asyncio.TimeoutError:
+        print("  LCU timed out (60s).")
         return None
     finally:
         client.remove_event_handler(handler1)
@@ -177,12 +192,16 @@ async def get_download_link_lcu(client, channel_msg_id):
         await client.send_message(LINK_STREAMER_BOT, player_link)
         reply2 = await asyncio.wait_for(future2, timeout=60.0)
         text2 = reply2.raw_text or ""
+        
+        print(f"  [DEBUG] Streamer Reply: {text2}")
         links2 = re.findall(r'(https?://[^\s`\'"]+)', text2)
         for l in links2:
             if 'streamapi.mrfooll.xyz' in l:
                 return l
+        print("  Streamer did not provide a streamapi link.")
         return None
     except asyncio.TimeoutError:
+        print("  Streamer timed out (60s).")
         return None
     finally:
         client.remove_event_handler(handler2)
