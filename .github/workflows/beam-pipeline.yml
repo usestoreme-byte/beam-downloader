@@ -13,23 +13,10 @@ permissions:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    container: ghcr.io/${{ github.repository_owner }}/beam-downloader:latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 ffmpeg mkvtoolnix tesseract-ocr mediainfo
-
-      - name: Install Python dependencies
-        run: |
-          pip install telethon requests requests-toolbelt pymediainfo pgsrip
 
       - name: Run Pipeline Script
         env:
@@ -45,6 +32,7 @@ jobs:
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add state.json folders.json || true
+          git add state.json || true
+          git add folders.json || true
           git commit -m "Update state [skip ci]" || echo "No changes to commit"
           git push || echo "No changes to push"
