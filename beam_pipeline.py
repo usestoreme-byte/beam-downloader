@@ -38,7 +38,6 @@ TEMP_FOLDER = "./temp_downloads"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-# Archive.org / Litterbox config
 IA_ACCESS_KEY = os.environ.get("IA_ACCESS_KEY", "EQ6XJ3AACbxfK4n7").strip()
 IA_SECRET_KEY = os.environ.get("IA_SECRET_KEY", "BlzN7vT0uJo7g3n2").strip()
 LITTERBOX_API = "https://litterbox.catbox.moe/resources/internals/api.php"
@@ -211,7 +210,7 @@ async def get_download_link(client, channel_msg_id):
     return link
 
 # ============================================================================
-# STATE FILES
+# STATE FILES (IMMEDIATE GIT PUSH)
 # ============================================================================
 def get_checkpoint():
     if not os.path.exists(CHECKPOINT_FILE): return 0
@@ -219,6 +218,15 @@ def get_checkpoint():
 
 def save_checkpoint(last_id):
     with open(CHECKPOINT_FILE, 'w') as f: json.dump({"last_id": last_id}, f)
+    try:
+        subprocess.run(["git", "config", "user.name", "GitHub Actions"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "config", "user.email", "actions@github.com"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "add", CHECKPOINT_FILE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", f"Checkpoint {last_id} [skip ci]"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "push"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"  [STATE] Pushed checkpoint {last_id} to GitHub immediately.")
+    except Exception as e:
+        print(f"  [WARN] Failed to push checkpoint immediately: {e}")
 
 def get_or_create_vidara_folder(series_name, season_num, quality):
     cache = {}
@@ -547,12 +555,20 @@ async def process_row(client, row):
     links_table = "movie_links" if content_type == "movie" else "episode_links"
     id_column = "movie_id" if content_type == "movie" else "episode_id"
     
-    existing_links = turso_query_all(f"SELECT audio_languages FROM {links_table} WHERE {id_column} = ? AND quality = ?", [content_id, base_quality])
+    # Fetch ALL links for this movie/episode and filter in Python to avoid SQL formatting mismatches
+    all_existing_links = turso_query_all(f"SELECT quality, audio_languages FROM {links_table} WHERE {id_column} = ?", [content_id])
     done_langs = set()
-    for link_row in existing_links:
-        for l in json.loads(link_row["audio_languages"] or "[]"): done_langs.add(l)
+    
+    print(f"  [DEBUG] Base Quality parsed as: '{base_quality}'")
+    for link_row in all_existing_links:
+        db_q = (link_row.get("quality") or "").lower()
+        db_langs_raw = link_row.get("audio_languages") or "[]"
+        print(f"  [DEBUG] DB Link found: quality='{db_q}', langs={db_langs_raw}")
+        
+        if db_q == base_quality:
+            for l in json.loads(db_langs_raw):
+                done_langs.add(l)
             
-    print(f"\n*** PROCESSING: {file_name} ***")
     print(f"  Already Done: {list(done_langs)}")
     
     link = await get_download_link(client, channel_msg_id)
@@ -598,14 +614,12 @@ async def process_row(client, row):
             
         print(f"  Processing language: {lang}")
         
-        # ONLY create folder if we are actually uploading an episode
         if content_type == "episode" and folder_id is None:
             folder_id = get_or_create_vidara_folder(title, season, base_quality)
             
         output_name = build_filename(content_type, title, year, season, episode, base_quality, lang)
         output_path = os.path.join(OUTPUT_FOLDER, output_name)
         
-        # Prepare subtitles (OCR if needed)
         sub_candidates, sub_failures, sub_overrides = prepare_english_subtitle_urls(
             temp_path, subtitle_tracks, f"{tmdb_id}", f"row{df_id}_{base_quality}"
         )
@@ -614,7 +628,6 @@ async def process_row(client, row):
         
         remux_single_audio(temp_path, output_path, track, subtitle_tracks, sub_overrides)
         
-        # Clean up OCR temp files
         for p in sub_overrides.values(): safe_delete(p)
         
         print(f"  Uploading to Vidara: {output_name}")
@@ -632,7 +645,6 @@ async def process_row(client, row):
         
     safe_delete(temp_path)
     
-    # Print subtitle backup links clearly in the logs
     if all_sub_candidates:
         print("\n" + "="*50)
         print("📋 SUBTITLE BACKUP LINKS (If Vidara misses them)")
