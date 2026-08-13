@@ -23,12 +23,23 @@ CHECKPOINT_FILE = "state.json"
 BATCH_SIZE = 100
 
 # ============================================================================
-# TURSO DB CLIENT
+# TURSO DB CLIENT (Fixed formatting)
 # ============================================================================
+def to_turso_arg(value):
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "integer", "value": "1" if value else "0"}
+    if isinstance(value, int):
+        return {"type": "integer", "value": str(value)}
+    if isinstance(value, float):
+        return {"type": "float", "value": str(value)}
+    return {"type": "text", "value": str(value)}
+
 def turso_execute(sql, args=[]):
     payload = {
         "requests": [
-            {"type": "execute", "stmt": {"sql": sql, "args": args}},
+            {"type": "execute", "stmt": {"sql": sql, "args": [to_turso_arg(a) for a in args]}},
             {"type": "close"}
         ]
     }
@@ -116,13 +127,16 @@ async def main():
     print(f"Found {len(rows)} candidate rows. Finding first one with missing work...\n")
     
     for row in rows:
-        df_id = row["id"]
-        content_type = row["content_type"]
-        content_id = row["content_id"]
-        quality = row["quality"]
-        channel_msg_id = row["channel_msg_id"]
-        file_name = row["file_name"]
-        declared_langs = json.loads(row["audio_languages"] or "[]")
+        # Extract row data carefully handling potential nulls
+        df_id = row["id"]["value"] if isinstance(row["id"], dict) else row["id"]
+        content_type = row["content_type"]["value"] if isinstance(row["content_type"], dict) else row["content_type"]
+        content_id = row["content_id"]["value"] if isinstance(row["content_id"], dict) else row["content_id"]
+        quality = row["quality"]["value"] if isinstance(row["quality"], dict) else row["quality"]
+        channel_msg_id = row["channel_msg_id"]["value"] if isinstance(row["channel_msg_id"], dict) else row["channel_msg_id"]
+        file_name = row["file_name"]["value"] if isinstance(row["file_name"], dict) else row["file_name"]
+        
+        audio_lang_raw = row["audio_languages"]["value"] if isinstance(row["audio_languages"], dict) else row["audio_languages"]
+        declared_langs = json.loads(audio_lang_raw or "[]")
         
         if not declared_langs:
             declared_langs = ["Unknown"]
@@ -139,7 +153,8 @@ async def main():
         
         done_langs = set()
         for link_row in existing_links:
-            langs = json.loads(link_row["audio_languages"] or "[]")
+            lang_raw = link_row["audio_languages"]["value"] if isinstance(link_row["audio_languages"], dict) else link_row["audio_languages"]
+            langs = json.loads(lang_raw or "[]")
             for l in langs:
                 done_langs.add(l)
                 
