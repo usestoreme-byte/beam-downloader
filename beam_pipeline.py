@@ -38,6 +38,11 @@ TEMP_FOLDER = "./temp_downloads"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
+# Archive.org / Litterbox config (from your original code)
+IA_ACCESS_KEY = os.environ.get("IA_ACCESS_KEY", "EQ6XJ3AACbxfK4n7").strip()
+IA_SECRET_KEY = os.environ.get("IA_SECRET_KEY", "BlzN7vT0uJo7g3n2").strip()
+LITTERBOX_API = "https://litterbox.catbox.moe/resources/internals/api.php"
+
 LANG_MAP = {
     "as": "Assamese", "te": "Telugu", "hi": "Hindi", "ta": "Tamil", "ml": "Malayalam",
     "kn": "Kannada", "bn": "Bengali", "pa": "Punjabi", "gu": "Gujarati", "mr": "Marathi",
@@ -244,7 +249,7 @@ def get_or_create_vidara_folder(series_name, season_num, quality):
     return None
 
 # ============================================================================
-# MEDIA PROCESSING
+# MEDIA PROCESSING & SUBTITLES
 # ============================================================================
 def normalize_audio_lang(raw_code, raw_name=None, override_map=None):
     code = (raw_code or "").strip().lower()
@@ -289,16 +294,32 @@ def inspect_tracks(file_path, tmdb_id=None):
     if not audio_tracks: audio_tracks = [{"stream_index": 0, "language": "Unknown"}]
     return audio_tracks, subtitle_tracks
 
-def remux_single_audio(source_path, output_path, audio_track, subtitle_tracks):
+def remux_single_audio(source_path, output_path, audio_track, subtitle_tracks, subtitle_srt_overrides=None):
+    subtitle_srt_overrides = subtitle_srt_overrides or {}
     cmd = ["ffmpeg", "-y", "-i", str(source_path)]
+    override_input_idx = {}
+    next_input = 1
+    for sub in subtitle_tracks:
+        override_path = subtitle_srt_overrides.get(sub["stream_index"])
+        if override_path and os.path.exists(override_path):
+            cmd += ["-i", str(override_path)]
+            override_input_idx[sub["stream_index"]] = next_input
+            next_input += 1
+
     cmd += ["-map", "0:v:0", "-map", f"0:a:{audio_track['stream_index']}"]
     mapped_subs = []
     for sub in subtitle_tracks:
-        fmt = sub.get("format", "").lower()
-        codec = sub.get("codec", "").lower()
-        if not any(s in fmt or s in codec for s in ["subrip", "srt", "utf-8", "ass", "ssa", "pgs", "pgssub", "hdmv", "vobsub", "dvd_subtitle", "s_text", "s_hdmv"]): continue
-        mapped_subs.append(sub)
-        cmd += ["-map", f"0:s:{sub['stream_index']}"]
+        if sub["stream_index"] in override_input_idx:
+            mapped_subs.append(sub)
+            cmd += ["-map", f"{override_input_idx[sub['stream_index']]}:0"]
+            cmd += [f"-c:s:{len(mapped_subs)-1}", "copy"]
+        else:
+            fmt = sub.get("format", "").lower()
+            codec = sub.get("codec", "").lower()
+            if not any(s in fmt or s in codec for s in ["subrip", "srt", "utf-8", "ass", "ssa", "pgs", "pgssub", "hdmv", "vobsub", "dvd_subtitle", "s_text", "s_hdmv"]): continue
+            mapped_subs.append(sub)
+            cmd += ["-map", f"0:s:{sub['stream_index']}"]
+
     cmd += ["-c", "copy", "-map_chapters", "-1"]
     cmd += ["-metadata:s:a:0", f"language={iso3_for_language(audio_track['language'])}"]
     for out_idx, sub in enumerate(mapped_subs):
@@ -324,6 +345,146 @@ def build_filename(content_type, title, year, season, episode, quality, language
     else:
         return f"{clean_title} S{int(season):02d} E{int(episode):02d} {quality} {language}.mkv"
 
+# --- Subtitle OCR & Hosting (From your original code) ---
+def extract_subtitle_to_srt(source_path, subtitle_stream_index, output_srt_path):
+    cmd = ["ffmpeg", "-y", "-i", str(source_path), "-map", f"0:s:{subtitle_stream_index}", "-c:s", "srt", str(output_srt_path)]
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0 or not os.path.exists(output_srt_path) or os.path.getsize(output_srt_path) < 10:
+        raise Exception(f"ffmpeg subtitle extraction failed: {result.stderr[-300:] if result.stderr else 'unknown error'}")
+    return True
+
+def extract_subtitle_raw_copy(source_path, subtitle_stream_index, output_path):
+    cmd = ["ffmpeg", "-y", "-i", str(source_path), "-map", f"0:s:{subtitle_stream_index}", "-c:s", "copy", str(output_path)]
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) < 10:
+        raise Exception(f"ffmpeg raw subtitle copy failed: {result.stderr[-300:] if result.stderr else 'unknown error'}")
+    return True
+
+def fix_common_ocr_errors(text):
+    return text.replace("|", "I")
+
+def ocr_pgs_from_source(source_path, language_code="en", timeout=600):
+    cmd = ["pgsrip", "-l", language_code, str(source_path)]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+    base, _ = os.path.splitext(str(source_path))
+    expected_srt = f"{base}.{language_code}.srt"
+    if not os.path.exists(expected_srt) or os.path.getsize(expected_srt) < 10:
+        raise Exception(f"pgsrip produced no usable output: {(result.stderr or result.stdout)[-300:]}")
+    with open(expected_srt, "r", encoding="utf-8", errors="replace") as f:
+        corrected = fix_common_ocr_errors(f.read())
+    with open(expected_srt, "w", encoding="utf-8") as f:
+        f.write(corrected)
+    return expected_srt
+
+def slugify_for_ia(text, max_len=80):
+    text = re.sub(r'[^a-zA-Z0-9\-_.]', '-', text or "")
+    text = re.sub(r'-+', '-', text).strip('-_.')
+    return (text.lower() or "item")[:max_len]
+
+def upload_to_archive_org(file_path, bucket_hint, key_hint, content_type="application/x-subrip", extension="srt", wait_seconds=60):
+    bucket = slugify_for_ia(f"beamplay-subs-{bucket_hint}")
+    key = slugify_for_ia(key_hint) + f".{extension}"
+    upload_url = f"https://s3.us.archive.org/{bucket}/{key}"
+    headers = {
+        "authorization": f"LOW {IA_ACCESS_KEY}:{IA_SECRET_KEY}",
+        "x-amz-auto-make-bucket": "1", "x-archive-meta-mediatype": "texts",
+        "x-archive-meta-collection": "opensource", "x-archive-ignore-preexisting-bucket": "1",
+        "Content-Type": content_type,
+    }
+    with open(file_path, "rb") as fh: data = fh.read()
+    response = requests.put(upload_url, data=data, headers=headers, timeout=60)
+    if response.status_code not in (200, 201):
+        raise Exception(f"Archive.org upload failed: {response.status_code} {response.text[:200]}")
+    direct_url = f"https://archive.org/download/{bucket}/{key}"
+    attempts = max(1, wait_seconds // 5)
+    for _ in range(attempts):
+        try:
+            check = requests.head(direct_url, timeout=10, allow_redirects=True)
+            if check.status_code == 200: return direct_url
+        except Exception: pass
+        time.sleep(5)
+    return direct_url
+
+def upload_to_litterbox(file_path, expire="72h"):
+    with open(file_path, "rb") as fh:
+        response = requests.post(LITTERBOX_API, data={"reqtype": "fileupload", "time": expire}, files={"fileToUpload": fh}, timeout=30)
+    response.raise_for_status()
+    url = response.text.strip()
+    if not url.startswith("http"): raise Exception(f"Litterbox did not return a URL: {url[:200]}")
+    return url
+
+def host_subtitle_everywhere(sub_path, bucket_hint, key_hint, content_type="application/x-subrip", extension="srt"):
+    hosted, errors = [], []
+    try: hosted.append((upload_to_archive_org(sub_path, bucket_hint, key_hint, content_type=content_type, extension=extension), "Archive.org"))
+    except Exception as e: errors.append(f"Archive.org: {e}")
+    try: hosted.append((upload_to_litterbox(sub_path), "Litterbox"))
+    except Exception as e: errors.append(f"Litterbox: {e}")
+    if not hosted: raise Exception(" | ".join(errors))
+    return hosted
+
+def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp_prefix):
+    candidates, failures, srt_overrides = [], [], {}
+    english_tracks = [s for s in subtitle_tracks if s["language"] == "English"]
+    if not english_tracks: return candidates, failures, srt_overrides
+
+    whole_file_ocr_tried, whole_file_ocr_srt, whole_file_ocr_error = False, None, None
+
+    for idx, sub in enumerate(english_tracks):
+        srt_path = os.path.join(TEMP_FOLDER, f"{tmp_prefix}_sub{idx}.srt")
+        sup_path = os.path.join(TEMP_FOLDER, f"{tmp_prefix}_sub{idx}.sup")
+        srt_err_msg = None
+        try:
+            extract_subtitle_to_srt(source_path, sub["stream_index"], srt_path)
+            hosted = host_subtitle_everywhere(srt_path, bucket_hint, f"{tmp_prefix}_sub{idx}")
+            candidates.append({"hosts": hosted, "format": "srt"})
+            srt_overrides[sub["stream_index"]] = srt_path
+            for url, host in hosted: print(f"         [SUB] English subtitle #{idx+1} (srt) hosted via {host} -> {url}")
+            continue
+        except Exception as e:
+            srt_err_msg = str(e)
+            safe_delete(srt_path)
+
+        if not whole_file_ocr_tried:
+            whole_file_ocr_tried = True
+            try:
+                produced_path = ocr_pgs_from_source(source_path, language_code="en")
+                shutil.copy(produced_path, srt_path)
+                safe_delete(produced_path)
+                whole_file_ocr_srt = srt_path
+            except Exception as e:
+                whole_file_ocr_error = str(e)
+                print(f"         [WARN] PGS OCR failed: {e}")
+        elif whole_file_ocr_srt:
+            shutil.copy(whole_file_ocr_srt, srt_path)
+
+        if whole_file_ocr_srt and os.path.exists(srt_path):
+            try:
+                hosted = host_subtitle_everywhere(srt_path, bucket_hint, f"{tmp_prefix}_sub{idx}")
+                candidates.append({"hosts": hosted, "format": "srt (OCR)"})
+                srt_overrides[sub["stream_index"]] = srt_path
+                for url, host in hosted: print(f"         [SUB] English subtitle #{idx+1} (OCR'd from PGS) hosted via {host} -> {url}")
+                continue
+            except Exception as host_err:
+                safe_delete(srt_path)
+                failures.append(f"track #{idx+1}: OCR succeeded but hosting failed ({host_err})")
+                continue
+
+        try:
+            extract_subtitle_raw_copy(source_path, sub["stream_index"], sup_path)
+            hosted = host_subtitle_everywhere(sup_path, bucket_hint, f"{tmp_prefix}_sub{idx}", content_type="application/octet-stream", extension="sup")
+            candidates.append({"hosts": hosted, "format": "sup (OCR failed, raw)"})
+            for url, host in hosted: print(f"         [SUB] English subtitle #{idx+1} (raw .sup, OCR failed) hosted via {host} -> {url}")
+        except Exception as raw_err:
+            failures.append(f"track #{idx+1}: srt failed ({srt_err_msg}); OCR failed ({whole_file_ocr_error}); raw backup failed ({raw_err})")
+            print(f"         [WARN] Could not prepare English subtitle #{idx+1} via any method")
+        finally:
+            safe_delete(sup_path)
+
+    return candidates, failures, srt_overrides
+
+# ============================================================================
+# VIDARA & DOWNLOAD
+# ============================================================================
 def fetch_vidara_upload_server():
     try:
         res = requests.get("https://api.vidara.so/v1/upload/server", params={"api_key": VIDARA_API_KEY}, timeout=30)
@@ -429,7 +590,6 @@ async def process_row(client, row):
             title = ep_data["series_title"]
             season = ep_data["season_number"]
             episode = ep_data["episode_number"]
-            folder_id = get_or_create_vidara_folder(title, season, base_quality)
 
     seen_langs = set()
     
@@ -440,10 +600,23 @@ async def process_row(client, row):
             continue
             
         print(f"  Processing language: {lang}")
+        
+        # ONLY create folder if we are actually uploading an episode
+        if content_type == "episode" and folder_id is None:
+            folder_id = get_or_create_vidara_folder(title, season, base_quality)
+            
         output_name = build_filename(content_type, title, year, season, episode, base_quality, lang)
         output_path = os.path.join(OUTPUT_FOLDER, output_name)
         
-        remux_single_audio(temp_path, output_path, track, subtitle_tracks)
+        # Prepare subtitles (OCR if needed)
+        sub_candidates, sub_failures, sub_overrides = prepare_english_subtitle_urls(
+            temp_path, subtitle_tracks, f"{tmdb_id}", f"row{df_id}_{base_quality}"
+        )
+        
+        remux_single_audio(temp_path, output_path, track, subtitle_tracks, sub_overrides)
+        
+        # Clean up OCR temp files
+        for p in sub_overrides.values(): safe_delete(p)
         
         print(f"  Uploading to Vidara: {output_name}")
         video_url, filecode = upload_to_vidara(output_path, output_name, folder_id)
@@ -482,8 +655,6 @@ async def main():
     for row in rows:
         try:
             await process_row(client, row)
-            print("\nStopping run after 1 successful file for verification.")
-            break # Remove this break to let it process the whole batch!
         except Exception as e:
             print(f"\n[ERROR] Failed to process row {row['id']}: {e}")
             print("Stopping pipeline. Will retry this row next run.")
