@@ -24,9 +24,14 @@ API_HASH = os.environ.get("TG_API_HASH")
 SESSION_BASE64 = os.environ.get("TG_SESSION_BASE64")
 
 PRIVATE_CHANNEL_ID = -1003998322386
-AV_F2L_BOT_USERNAME = 'AV_F2L_BOT'
+
+# Bots
+F2L_BOT_USERNAME = 'AV_F2L_BOT'
+LCU_BOT_USERNAME = 'LCU_Filetolinkbot'
+LINK_STREAMER_BOT = 'linkstreamerbot'
 
 CHECKPOINT_FILE = "state.json"
+FOLDERS_FILE = "folders.json"
 BATCH_SIZE = 100
 
 OUTPUT_FOLDER = "./media/processed"
@@ -34,7 +39,6 @@ TEMP_FOLDER = "./temp_downloads"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-# Language Maps (From your original code)
 LANG_MAP = {
     "as": "Assamese", "te": "Telugu", "hi": "Hindi", "ta": "Tamil", "ml": "Malayalam",
     "kn": "Kannada", "bn": "Bengali", "pa": "Punjabi", "gu": "Gujarati", "mr": "Marathi",
@@ -65,10 +69,7 @@ LANG_MAP = {
 UNKNOWN_TOKENS = {"", "und", "unknown", "unk", "n/a", "none"}
 ISO2_TO_ISO3 = { "as": "asm", "te": "tel", "hi": "hin", "ta": "tam", "ml": "mal", "kn": "kan", "bn": "ben", "pa": "pan", "gu": "guj", "mr": "mar", "or": "ori", "en": "eng", "ja": "jpn", "ko": "kor", "es": "spa", "fr": "fre", "de": "ger", "ru": "rus", "zh": "chi", "it": "ita", "pt": "por", "ar": "ara", "tr": "tur", "id": "ind", "ms": "may", "th": "tha", "vi": "vie", "tl": "fil", "he": "heb", "fa": "per", "ur": "urd", "ne": "nep", "si": "sin", "my": "bur", "km": "khm", "lo": "lao", "mn": "mon", "nl": "dut", "sv": "swe", "no": "nor", "da": "dan", "fi": "fin", "pl": "pol", "cs": "cze", "sk": "slo", "hu": "hun", "ro": "rum", "el": "gre", "uk": "ukr", "bg": "bul", "hr": "hrv", "sr": "srp", "sl": "slv", "bs": "bos", "mk": "mac", "sq": "alb", "lt": "lit", "lv": "lav", "et": "est", "is": "ice", "ga": "gle", "cy": "wel", "eu": "baq", "ca": "cat", "gl": "glg", "af": "afr", "zu": "zul", "xh": "xho", "sw": "swa", "am": "amh", "so": "som", "ha": "hau", "yo": "yor", "ig": "ibo", "st": "sot", "ka": "geo", "hy": "arm", "az": "aze", "kk": "kaz", "uz": "uzb", "ky": "kir", "tg": "tgk", "tk": "tuk", "ps": "pus", "ku": "kur", "sd": "snd", "bo": "tib", "dz": "dzo", "jv": "jav", "su": "sun", "ceb": "ceb", "haw": "haw", "mi": "mao", "sm": "smo", "to": "ton", "fj": "fij", "eo": "epo", "la": "lat", "yi": "yid", "mt": "mlt", "lb": "ltz", "fo": "fao", "gd": "gla", "br": "bre", "co": "cos", "oc": "oci", "rm": "roh", "gn": "grn", "qu": "que", "ay": "aym", "ht": "hat" }
 NAME_TO_ISO3 = {name: ISO2_TO_ISO3[code] for code, name in LANG_MAP.items() if code in ISO2_TO_ISO3}
-
-SERIES_AUDIO_LANG_OVERRIDES = {
-    "1399": {"is": "English"},
-}
+SERIES_AUDIO_LANG_OVERRIDES = { "1399": {"is": "English"} }
 
 # ============================================================================
 # TURSO DB CLIENT
@@ -103,27 +104,25 @@ def turso_query_one(sql, args=[]):
     return rows[0] if rows else None
 
 # ============================================================================
-# TELEGRAM F2L BOT
+# TELEGRAM BOTS
 # ============================================================================
 def decode_session():
     if SESSION_BASE64:
         with open('beam_session.session', 'wb') as f:
             f.write(base64.b64decode(SESSION_BASE64))
 
-async def get_download_link(channel_msg_id):
-    client = TelegramClient('beam_session', API_ID, API_HASH)
-    await client.start()
-    
+async def get_download_link_f2l(client, channel_msg_id):
+    """Primary 1-step bot: AV_F2L_BOT"""
     future = asyncio.Future()
-    @client.on(events.NewMessage(from_users=AV_F2L_BOT_USERNAME))
+    @client.on(events.NewMessage(from_users=F2L_BOT_USERNAME))
     async def handler(event):
         if not future.done(): future.set_result(event.message)
             
     try:
-        await client.forward_messages(entity=AV_F2L_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
+        await client.forward_messages(entity=F2L_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
         reply_msg = await asyncio.wait_for(future, timeout=60.0)
         text = reply_msg.raw_text or ""
-        links = re.findall(r'(https?://\S+)', text)
+        links = re.findall(r'(https?://[^\s`\'"]+)', text)
         for l in links:
             if '/watch/' not in l: return l
         if links: return links[0]
@@ -136,10 +135,72 @@ async def get_download_link(channel_msg_id):
         return None
     finally:
         client.remove_event_handler(handler)
-        await client.disconnect()
+
+async def get_download_link_lcu(client, channel_msg_id):
+    """Fallback 2-step bot: LCU -> linkstreamer"""
+    # Step 1: Forward to LCU
+    future1 = asyncio.Future()
+    @client.on(events.NewMessage(from_users=LCU_BOT_USERNAME))
+    async def handler1(event):
+        if not future1.done(): future1.set_result(event.message)
+            
+    try:
+        await client.forward_messages(entity=LCU_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
+        reply1 = await asyncio.wait_for(future1, timeout=60.0)
+        text1 = reply1.raw_text or ""
+        links1 = re.findall(r'(https?://[^\s`\'"]+)', text1)
+        player_link = None
+        for l in links1:
+            if 'mrfooll.xyz' in l:
+                player_link = l
+                break
+        if not player_link and reply1.buttons:
+            for row in reply1.buttons:
+                for btn in row:
+                    if btn.url and 'mrfooll.xyz' in btn.url:
+                        player_link = btn.url
+                        break
+                if player_link: break
+        if not player_link: return None
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        client.remove_event_handler(handler1)
+        
+    # Step 2: Send player link to linkstreamerbot
+    future2 = asyncio.Future()
+    @client.on(events.NewMessage(from_users=LINK_STREAMER_BOT))
+    async def handler2(event):
+        if not future2.done(): future2.set_result(event.message)
+            
+    try:
+        await client.send_message(LINK_STREAMER_BOT, player_link)
+        reply2 = await asyncio.wait_for(future2, timeout=60.0)
+        text2 = reply2.raw_text or ""
+        links2 = re.findall(r'(https?://[^\s`\'"]+)', text2)
+        for l in links2:
+            if 'streamapi.mrfooll.xyz' in l:
+                return l
+        return None
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        client.remove_event_handler(handler2)
+
+async def get_download_link(client, channel_msg_id):
+    print("  Trying LCU 2-step bot...")
+    link = await get_download_link_lcu(client, channel_msg_id)
+    if link:
+        print(f"  LCU Link: {link}")
+        return link
+        
+    print("  LCU failed. Falling back to AV_F2L_BOT...")
+    link = await get_download_link_f2l(client, channel_msg_id)
+    print(f"  F2L Link: {link}")
+    return link
 
 # ============================================================================
-# CHECKPOINT LOGIC
+# STATE FILES
 # ============================================================================
 def get_checkpoint():
     if not os.path.exists(CHECKPOINT_FILE): return 0
@@ -148,8 +209,36 @@ def get_checkpoint():
 def save_checkpoint(last_id):
     with open(CHECKPOINT_FILE, 'w') as f: json.dump({"last_id": last_id}, f)
 
+def get_or_create_vidara_folder(series_name, season_num, quality):
+    cache = {}
+    if os.path.exists(FOLDERS_FILE):
+        with open(FOLDERS_FILE, 'r') as f:
+            cache = json.load(f)
+            
+    cache_key = f"{series_name}_{season_num}_{quality}"
+    if cache_key in cache:
+        return cache[cache_key]
+        
+    clean_name = clean_string_for_vidara(series_name)
+    folder_name = f"{clean_name} Season {int(season_num):02d} {quality}"
+    
+    try:
+        res = requests.get(f"https://api.vidara.so/v1/folder/create?api_key={VIDARA_API_KEY}&name={requests.utils.quote(folder_name)}", timeout=30).json()
+        if res.get("status") == 200:
+            fld_id = res["result"]["folder_id"]
+            cache[cache_key] = fld_id
+            with open(FOLDERS_FILE, 'w') as f:
+                json.dump(cache, f)
+            print(f"  [FOLDER] Created/Fetched '{folder_name}' -> {fld_id}")
+            return fld_id
+        else:
+            print(f"  [FOLDER] Warning: {res}")
+    except Exception as e:
+        print(f"  [FOLDER] Error: {e}")
+    return None
+
 # ============================================================================
-# MEDIA PROCESSING (From your proven code)
+# MEDIA PROCESSING
 # ============================================================================
 def normalize_audio_lang(raw_code, raw_name=None, override_map=None):
     code = (raw_code or "").strip().lower()
@@ -181,8 +270,7 @@ def inspect_tracks(file_path, tmdb_id=None):
     for track in media.tracks:
         if track.track_type == "Audio":
             title = str(getattr(track, "title", "")).lower()
-            if any(kw in title for kw in ["commentary", "director", "descriptive", "visual impairment", "dvs"]):
-                continue
+            if any(kw in title for kw in ["commentary", "director", "descriptive", "visual impairment", "dvs"]): continue
             lang = normalize_audio_lang(track.language, getattr(track, "language_full", None), override_map)
             audio_tracks.append({"stream_index": audio_pos, "language": lang})
             audio_pos += 1
@@ -195,32 +283,16 @@ def inspect_tracks(file_path, tmdb_id=None):
     if not audio_tracks: audio_tracks = [{"stream_index": 0, "language": "Unknown"}]
     return audio_tracks, subtitle_tracks
 
-def remux_single_audio(source_path, output_path, audio_track, subtitle_tracks, subtitle_srt_overrides=None):
-    subtitle_srt_overrides = subtitle_srt_overrides or {}
+def remux_single_audio(source_path, output_path, audio_track, subtitle_tracks):
     cmd = ["ffmpeg", "-y", "-i", str(source_path)]
-    override_input_idx = {}
-    next_input = 1
-    for sub in subtitle_tracks:
-        override_path = subtitle_srt_overrides.get(sub["stream_index"])
-        if override_path and os.path.exists(override_path):
-            cmd += ["-i", str(override_path)]
-            override_input_idx[sub["stream_index"]] = next_input
-            next_input += 1
-
     cmd += ["-map", "0:v:0", "-map", f"0:a:{audio_track['stream_index']}"]
     mapped_subs = []
     for sub in subtitle_tracks:
-        if sub["stream_index"] in override_input_idx:
-            mapped_subs.append(sub)
-            cmd += ["-map", f"{override_input_idx[sub['stream_index']]}:0"]
-            cmd += [f"-c:s:{len(mapped_subs)-1}", "copy"]
-        else:
-            fmt = sub.get("format", "").lower()
-            codec = sub.get("codec", "").lower()
-            if not any(s in fmt or s in codec for s in ["subrip", "srt", "utf-8", "ass", "ssa", "pgs", "pgssub", "hdmv", "vobsub", "dvd_subtitle", "s_text", "s_hdmv"]): continue
-            mapped_subs.append(sub)
-            cmd += ["-map", f"0:s:{sub['stream_index']}"]
-
+        fmt = sub.get("format", "").lower()
+        codec = sub.get("codec", "").lower()
+        if not any(s in fmt or s in codec for s in ["subrip", "srt", "utf-8", "ass", "ssa", "pgs", "pgssub", "hdmv", "vobsub", "dvd_subtitle", "s_text", "s_hdmv"]): continue
+        mapped_subs.append(sub)
+        cmd += ["-map", f"0:s:{sub['stream_index']}"]
     cmd += ["-c", "copy", "-map_chapters", "-1"]
     cmd += ["-metadata:s:a:0", f"language={iso3_for_language(audio_track['language'])}"]
     for out_idx, sub in enumerate(mapped_subs):
@@ -253,22 +325,6 @@ def fetch_vidara_upload_server():
         data = res.json()
         return data.get("result", {}).get("upload_server") or data.get("upload_server")
     except: return "https://api.vidara.so/v1/upload/server"
-
-_folder_id_cache = {}
-def get_or_create_vidara_folder(series_name, season_num, quality, languages):
-    cache_key = (series_name, int(season_num), quality)
-    if cache_key in _folder_id_cache: return _folder_id_cache[cache_key]
-    clean_name = clean_string_for_vidara(series_name)
-    lang_str = " ".join(l[:3] for l in languages)
-    folder_name = f"{clean_name} Season {int(season_num):02d} {quality} {lang_str}"
-    try:
-        res = requests.get(f"https://api.vidara.so/v1/folder/create?api_key={VIDARA_API_KEY}&name={requests.utils.quote(folder_name)}", timeout=30).json()
-        if res.get("status") == 200:
-            fld_id = res["result"]["folder_id"]
-            _folder_id_cache[cache_key] = fld_id
-            return fld_id
-    except: pass
-    return None
 
 def extract_vidara_urls(data):
     full_url = data.get("url") or data.get("result", {}).get("url")
@@ -314,7 +370,7 @@ def safe_delete(path):
 # ============================================================================
 # MAIN PIPELINE
 # ============================================================================
-async def process_row(row):
+async def process_row(client, row):
     df_id = row["id"]
     content_type = row["content_type"]
     content_id = row["content_id"]
@@ -337,11 +393,9 @@ async def process_row(row):
     print(f"\n*** PROCESSING: {file_name} ***")
     print(f"  Already Done: {list(done_langs)}")
     
-    print(f"  Getting F2L link...")
-    link = await get_download_link(channel_msg_id)
+    link = await get_download_link(client, channel_msg_id)
     if not link:
-        raise Exception("F2L bot failed to return a link.")
-    print(f"  F2L Link: {link}")
+        raise Exception("Both F2L and LCU bots failed to return a link.")
     
     temp_path = os.path.join(TEMP_FOLDER, f"row{df_id}_{base_quality}.mkv")
     print(f"  Downloading...")
@@ -369,11 +423,9 @@ async def process_row(row):
             title = ep_data["series_title"]
             season = ep_data["season_number"]
             episode = ep_data["episode_number"]
-            all_langs = [a["language"] for a in audio_tracks]
-            folder_id = get_or_create_vidara_folder(title, season, base_quality, all_langs)
+            folder_id = get_or_create_vidara_folder(title, season, base_quality)
 
     seen_langs = set()
-    uploaded_any = False
     
     for track in audio_tracks:
         lang = track["language"]
@@ -398,7 +450,6 @@ async def process_row(row):
         )
         
         seen_langs.add(lang)
-        uploaded_any = True
         print(f"  [OK] {lang} done.")
         
     safe_delete(temp_path)
@@ -419,15 +470,20 @@ async def main():
         print("No new files to process. Exiting.")
         return
         
+    client = TelegramClient('beam_session', API_ID, API_HASH)
+    await client.start()
+    
     for row in rows:
         try:
-            await process_row(row)
+            await process_row(client, row)
             print("\nStopping run after 1 successful file for verification.")
             break # Remove this break to let it process the whole batch!
         except Exception as e:
             print(f"\n[ERROR] Failed to process row {row['id']}: {e}")
             print("Stopping pipeline. Will retry this row next run.")
             break
+            
+    await client.disconnect()
 
 if __name__ == "__main__":
     asyncio.run(main())
