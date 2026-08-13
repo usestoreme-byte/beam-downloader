@@ -23,18 +23,20 @@ CHECKPOINT_FILE = "state.json"
 BATCH_SIZE = 100
 
 # ============================================================================
-# TURSO DB CLIENT (Fixed formatting)
+# TURSO DB CLIENT
 # ============================================================================
 def to_turso_arg(value):
-    if value is None:
-        return {"type": "null"}
-    if isinstance(value, bool):
-        return {"type": "integer", "value": "1" if value else "0"}
-    if isinstance(value, int):
-        return {"type": "integer", "value": str(value)}
-    if isinstance(value, float):
-        return {"type": "float", "value": str(value)}
+    if value is None: return {"type": "null"}
+    if isinstance(value, bool): return {"type": "integer", "value": "1" if value else "0"}
+    if isinstance(value, int): return {"type": "integer", "value": str(value)}
+    if isinstance(value, float): return {"type": "float", "value": str(value)}
     return {"type": "text", "value": str(value)}
+
+def unwrap_turso_cell(cell):
+    if not cell or cell.get("type") == "null": return None
+    if cell.get("type") == "integer": return int(cell.get("value"))
+    if cell.get("type") == "float": return float(cell.get("value"))
+    return cell.get("value")
 
 def turso_execute(sql, args=[]):
     payload = {
@@ -51,7 +53,13 @@ def turso_execute(sql, args=[]):
 def turso_query_all(sql, args=[]):
     result = turso_execute(sql, args)
     cols = [c["name"] for c in result["cols"]]
-    return [dict(zip(cols, row)) for row in result["rows"]]
+    rows = []
+    for r in result["rows"]:
+        row_dict = {}
+        for i, col in enumerate(cols):
+            row_dict[col] = unwrap_turso_cell(r[i])
+        rows.append(row_dict)
+    return rows
 
 # ============================================================================
 # TELEGRAM F2L BOT
@@ -67,7 +75,7 @@ async def get_download_link(channel_msg_id):
     
     await client.forward_messages(
         entity=AV_F2L_BOT_USERNAME,
-        messages=channel_msg_id,
+        messages=int(channel_msg_id),  # Force integer
         from_peer=PRIVATE_CHANNEL_ID
     )
     
@@ -114,7 +122,6 @@ async def main():
     checkpoint = get_checkpoint()
     print(f"Current Checkpoint: {checkpoint}")
     
-    # Fetch next 100 rows from download_files
     rows = turso_query_all(
         "SELECT * FROM download_files WHERE id > ? ORDER BY id ASC LIMIT ?",
         [checkpoint, BATCH_SIZE]
@@ -127,51 +134,49 @@ async def main():
     print(f"Found {len(rows)} candidate rows. Finding first one with missing work...\n")
     
     for row in rows:
-        # Extract row data carefully handling potential nulls
-        df_id = row["id"]["value"] if isinstance(row["id"], dict) else row["id"]
-        content_type = row["content_type"]["value"] if isinstance(row["content_type"], dict) else row["content_type"]
-        content_id = row["content_id"]["value"] if isinstance(row["content_id"], dict) else row["content_id"]
-        quality = row["quality"]["value"] if isinstance(row["quality"], dict) else row["quality"]
-        channel_msg_id = row["channel_msg_id"]["value"] if isinstance(row["channel_msg_id"], dict) else row["channel_msg_id"]
-        file_name = row["file_name"]["value"] if isinstance(row["file_name"], dict) else row["file_name"]
-        
-        audio_lang_raw = row["audio_languages"]["value"] if isinstance(row["audio_languages"], dict) else row["audio_languages"]
-        declared_langs = json.loads(audio_lang_raw or "[]")
+        df_id = row["id"]
+        content_type = row["content_type"]
+        content_id = row["content_id"]
+        raw_quality = row["quality"] or ""
+        channel_msg_id = row["channel_msg_id"]
+        file_name = row["file_name"]
+        declared_langs = json.loads(row["audio_languages"] or "[]")
         
         if not declared_langs:
             declared_langs = ["Unknown"]
             
+        # Extract base quality (e.g. "1080p" from "1080p WEB-DL")
+        q_match = re.search(r'(2160p|1080p|720p|480p|360p)', raw_quality, re.IGNORECASE)
+        base_quality = q_match.group(1).lower() if q_match else raw_quality.lower()
+        
         # Determine which links table to check
         links_table = "movie_links" if content_type == "movie" else "episode_links"
         id_column = "movie_id" if content_type == "movie" else "episode_id"
         
-        # Check what languages are ALREADY done for this file's quality
+        # Check what languages are ALREADY done for this file's base quality
         existing_links = turso_query_all(
             f"SELECT audio_languages FROM {links_table} WHERE {id_column} = ? AND quality = ?",
-            [content_id, quality]
+            [content_id, base_quality]
         )
         
         done_langs = set()
         for link_row in existing_links:
-            lang_raw = link_row["audio_languages"]["value"] if isinstance(link_row["audio_languages"], dict) else link_row["audio_languages"]
-            langs = json.loads(lang_raw or "[]")
+            langs = json.loads(link_row["audio_languages"] or "[]")
             for l in langs:
                 done_langs.add(l)
                 
-        # What languages are actually missing?
         missing_langs = [l for l in declared_langs if l not in done_langs]
         
         if not missing_langs:
-            # Fully resolved, advance checkpoint safely
             print(f"[{df_id}] {file_name} - All languages already done. Skipping & advancing checkpoint.")
             save_checkpoint(df_id)
             continue
             
-        # WE FOUND WORK TO DO
         print(f"*** FOUND WORK TO DO ***")
         print(f"  Row ID      : {df_id}")
         print(f"  File        : {file_name}")
-        print(f"  Quality     : {quality}")
+        print(f"  Raw Quality : {raw_quality}")
+        print(f"  Base Quality: {base_quality}")
         print(f"  Type        : {content_type}")
         print(f"  Declared    : {declared_langs}")
         print(f"  Already Done: {list(done_langs)}")
