@@ -111,100 +111,99 @@ def decode_session():
         with open('beam_session.session', 'wb') as f:
             f.write(base64.b64decode(SESSION_BASE64))
 
-async def get_download_link_f2l(client, channel_msg_id):
-    """Primary 1-step bot: AV_F2L_BOT"""
+async def wait_for_bot_reply(client, bot_username, target_regex, timeout=90):
+    """Smart listener that ignores loading messages and waits for the specific link."""
     future = asyncio.Future()
-    @client.on(events.NewMessage(from_users=F2L_BOT_USERNAME))
+    
+    @client.on(events.NewMessage(from_users=bot_username))
     async def handler(event):
-        if not future.done(): future.set_result(event.message)
+        msg = event.message
+        text = msg.raw_text or ""
+        
+        # Check if text contains our target link
+        if re.search(target_regex, text):
+            if not future.done(): future.set_result(msg)
+            return
             
-    try:
-        await client.forward_messages(entity=F2L_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
-        reply_msg = await asyncio.wait_for(future, timeout=60.0)
-        text = reply_msg.raw_text or ""
-        links = re.findall(r'(https?://[^\s`\'"]+)', text)
-        for l in links:
-            if '/watch/' not in l: return l
-        if links: return links[0]
-        if reply_msg.buttons:
-            for row in reply_msg.buttons:
+        # Check if buttons contain our target link
+        if msg.buttons:
+            for row in msg.buttons:
                 for btn in row:
-                    if btn.url: return btn.url
-        return None
+                    if btn.url and re.search(target_regex, btn.url):
+                        if not future.done(): future.set_result(msg)
+                        return
+                        
+    try:
+        await asyncio.wait_for(future, timeout=timeout)
+        return future.result()
     except asyncio.TimeoutError:
         return None
     finally:
         client.remove_event_handler(handler)
 
+async def get_download_link_f2l(client, channel_msg_id):
+    """Primary 1-step bot: AV_F2L_BOT"""
+    try:
+        await client.forward_messages(entity=F2L_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
+        # Wait for a message containing a worker.dev link
+        reply_msg = await wait_for_bot_reply(client, F2L_BOT_USERNAME, r'av-f2l-bot\.avbotz26\.workers\.dev', timeout=60)
+        if not reply_msg: return None
+        
+        text = reply_msg.raw_text or ""
+        links = re.findall(r'(https?://[^\s`\'"]+)', text)
+        for l in links:
+            if '/watch/' not in l: return l
+        if links: return links[0]
+        
+        if reply_msg.buttons:
+            for row in reply_msg.buttons:
+                for btn in row:
+                    if btn.url: return btn.url
+        return None
+    except Exception as e:
+        print(f"  F2L Error: {e}")
+        return None
+
 async def get_download_link_lcu(client, channel_msg_id):
     """Fallback 2-step bot: LCU -> linkstreamer"""
-    # Step 1: Forward to LCU
-    future1 = asyncio.Future()
-    @client.on(events.NewMessage(from_users=LCU_BOT_USERNAME))
-    async def handler1(event):
-        if not future1.done(): future1.set_result(event.message)
-            
     try:
+        # Step 1: Forward to LCU and wait for player2 link
         await client.forward_messages(entity=LCU_BOT_USERNAME, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
-        reply1 = await asyncio.wait_for(future1, timeout=60.0)
+        reply1 = await wait_for_bot_reply(client, LCU_BOT_USERNAME, r'player2\.mrfooll\.xyz', timeout=60)
+        if not reply1:
+            print("  LCU did not provide a player link.")
+            return None
+            
+        # Extract player link
         text1 = reply1.raw_text or ""
+        links1 = re.findall(r'(https?://player2\.mrfooll\.xyz[^\s`\'"]+)', text1)
+        player_link = links1[0] if links1 else None
         
-        print(f"  [DEBUG] LCU Reply: {text1}")
-        if reply1.buttons:
-            for row in reply1.buttons:
-                for btn in row:
-                    if btn.url:
-                        print(f"  [DEBUG] LCU Button: {btn.text} -> {btn.url}")
-        
-        links1 = re.findall(r'(https?://[^\s`\'"]+)', text1)
-        player_link = None
-        for l in links1:
-            if 'mrfooll.xyz' in l:
-                player_link = l
-                break
         if not player_link and reply1.buttons:
             for row in reply1.buttons:
                 for btn in row:
-                    if btn.url and 'mrfooll.xyz' in btn.url:
+                    if btn.url and 'player2.mrfooll.xyz' in btn.url:
                         player_link = btn.url
                         break
                 if player_link: break
                 
-        if not player_link:
-            print("  LCU did not provide a mrfooll.xyz link.")
-            return None
-            
+        if not player_link: return None
         print(f"  LCU Player Link: {player_link}")
         
-    except asyncio.TimeoutError:
-        print("  LCU timed out (60s).")
-        return None
-    finally:
-        client.remove_event_handler(handler1)
-        
-    # Step 2: Send player link to linkstreamerbot
-    future2 = asyncio.Future()
-    @client.on(events.NewMessage(from_users=LINK_STREAMER_BOT))
-    async def handler2(event):
-        if not future2.done(): future2.set_result(event.message)
-            
-    try:
+        # Step 2: Send to linkstreamerbot and wait for streamapi link
         await client.send_message(LINK_STREAMER_BOT, player_link)
-        reply2 = await asyncio.wait_for(future2, timeout=60.0)
+        reply2 = await wait_for_bot_reply(client, LINK_STREAMER_BOT, r'streamapi\.mrfooll\.xyz', timeout=90)
+        if not reply2:
+            print("  Streamer did not provide a streamapi link.")
+            return None
+            
         text2 = reply2.raw_text or ""
+        links2 = re.findall(r'(https?://streamapi\.mrfooll\.xyz[^\s`\'"]+)', text2)
+        return links2[0] if links2 else None
         
-        print(f"  [DEBUG] Streamer Reply: {text2}")
-        links2 = re.findall(r'(https?://[^\s`\'"]+)', text2)
-        for l in links2:
-            if 'streamapi.mrfooll.xyz' in l:
-                return l
-        print("  Streamer did not provide a streamapi link.")
+    except Exception as e:
+        print(f"  LCU Error: {e}")
         return None
-    except asyncio.TimeoutError:
-        print("  Streamer timed out (60s).")
-        return None
-    finally:
-        client.remove_event_handler(handler2)
 
 async def get_download_link(client, channel_msg_id):
     print("  Trying LCU 2-step bot...")
