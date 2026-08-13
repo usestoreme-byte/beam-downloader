@@ -38,7 +38,7 @@ TEMP_FOLDER = "./temp_downloads"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-# Archive.org / Litterbox config (from your original code)
+# Archive.org / Litterbox config
 IA_ACCESS_KEY = os.environ.get("IA_ACCESS_KEY", "EQ6XJ3AACbxfK4n7").strip()
 IA_SECRET_KEY = os.environ.get("IA_SECRET_KEY", "BlzN7vT0uJo7g3n2").strip()
 LITTERBOX_API = "https://litterbox.catbox.moe/resources/internals/api.php"
@@ -345,7 +345,7 @@ def build_filename(content_type, title, year, season, episode, quality, language
     else:
         return f"{clean_title} S{int(season):02d} E{int(episode):02d} {quality} {language}.mkv"
 
-# --- Subtitle OCR & Hosting (From your original code) ---
+# --- Subtitle OCR & Hosting ---
 def extract_subtitle_to_srt(source_path, subtitle_stream_index, output_srt_path):
     cmd = ["ffmpeg", "-y", "-i", str(source_path), "-map", f"0:s:{subtitle_stream_index}", "-c:s", "srt", str(output_srt_path)]
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -438,7 +438,6 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
             hosted = host_subtitle_everywhere(srt_path, bucket_hint, f"{tmp_prefix}_sub{idx}")
             candidates.append({"hosts": hosted, "format": "srt"})
             srt_overrides[sub["stream_index"]] = srt_path
-            for url, host in hosted: print(f"         [SUB] English subtitle #{idx+1} (srt) hosted via {host} -> {url}")
             continue
         except Exception as e:
             srt_err_msg = str(e)
@@ -453,7 +452,6 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
                 whole_file_ocr_srt = srt_path
             except Exception as e:
                 whole_file_ocr_error = str(e)
-                print(f"         [WARN] PGS OCR failed: {e}")
         elif whole_file_ocr_srt:
             shutil.copy(whole_file_ocr_srt, srt_path)
 
@@ -462,7 +460,6 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
                 hosted = host_subtitle_everywhere(srt_path, bucket_hint, f"{tmp_prefix}_sub{idx}")
                 candidates.append({"hosts": hosted, "format": "srt (OCR)"})
                 srt_overrides[sub["stream_index"]] = srt_path
-                for url, host in hosted: print(f"         [SUB] English subtitle #{idx+1} (OCR'd from PGS) hosted via {host} -> {url}")
                 continue
             except Exception as host_err:
                 safe_delete(srt_path)
@@ -473,10 +470,8 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
             extract_subtitle_raw_copy(source_path, sub["stream_index"], sup_path)
             hosted = host_subtitle_everywhere(sup_path, bucket_hint, f"{tmp_prefix}_sub{idx}", content_type="application/octet-stream", extension="sup")
             candidates.append({"hosts": hosted, "format": "sup (OCR failed, raw)"})
-            for url, host in hosted: print(f"         [SUB] English subtitle #{idx+1} (raw .sup, OCR failed) hosted via {host} -> {url}")
         except Exception as raw_err:
             failures.append(f"track #{idx+1}: srt failed ({srt_err_msg}); OCR failed ({whole_file_ocr_error}); raw backup failed ({raw_err})")
-            print(f"         [WARN] Could not prepare English subtitle #{idx+1} via any method")
         finally:
             safe_delete(sup_path)
 
@@ -592,6 +587,8 @@ async def process_row(client, row):
             episode = ep_data["episode_number"]
 
     seen_langs = set()
+    all_sub_candidates = []
+    all_sub_failures = []
     
     for track in audio_tracks:
         lang = track["language"]
@@ -612,6 +609,8 @@ async def process_row(client, row):
         sub_candidates, sub_failures, sub_overrides = prepare_english_subtitle_urls(
             temp_path, subtitle_tracks, f"{tmdb_id}", f"row{df_id}_{base_quality}"
         )
+        all_sub_candidates.extend(sub_candidates)
+        all_sub_failures.extend(sub_failures)
         
         remux_single_audio(temp_path, output_path, track, subtitle_tracks, sub_overrides)
         
@@ -632,6 +631,23 @@ async def process_row(client, row):
         print(f"  [OK] {lang} done.")
         
     safe_delete(temp_path)
+    
+    # Print subtitle backup links clearly in the logs
+    if all_sub_candidates:
+        print("\n" + "="*50)
+        print("📋 SUBTITLE BACKUP LINKS (If Vidara misses them)")
+        print("="*50)
+        for i, cand in enumerate(all_sub_candidates, 1):
+            fmt = cand.get("format", "srt")
+            print(f"Subtitle #{i} [{fmt}]:")
+            for url, host in cand.get("hosts", []):
+                print(f"  -> {host}: {url}")
+        print("="*50 + "\n")
+    if all_sub_failures:
+        print("[WARN] Subtitle preparation failures:")
+        for f in all_sub_failures:
+            print(f"  - {f}")
+            
     print(f"*** FINISHED ROW {df_id} ***")
     save_checkpoint(df_id)
 
