@@ -7,10 +7,14 @@ import asyncio
 import requests
 import subprocess
 import time
+import logging # <--- ADDED
 from pathlib import Path
 from pymediainfo import MediaInfo
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from telethon import TelegramClient, events
+
+# SILENCE TELETHON WARNINGS <--- ADDED
+logging.getLogger('telethon').setLevel(logging.ERROR)
 
 # ============================================================================
 # CONFIGURATION
@@ -23,7 +27,7 @@ API_ID = int(os.environ.get("TG_API_ID"))
 API_HASH = os.environ.get("TG_API_HASH")
 SESSION_BASE64 = os.environ.get("TG_SESSION_BASE64")
 
-PRIVATE_CHANNEL_ID = -1004446192375
+PRIVATE_CHANNEL_ID = -1004446192375  # YOUR NEW CHANNEL ID
 
 F2L_BOT_USERNAME = 'AV_F2L_BOT'
 LCU_BOT_USERNAME = 'LCU_Filetolinkbot'
@@ -226,15 +230,10 @@ def save_checkpoint(last_id):
         env["GIT_COMMITTER_NAME"] = "GitHub Actions"
         env["GIT_COMMITTER_EMAIL"] = "actions@github.com"
         
-        # Fix Docker git ownership error
         subprocess.run(["git", "config", "--global", "--add", "safe.directory", repo_dir], env=env, check=True)
-        
         subprocess.run(["git", "add", CHECKPOINT_FILE], cwd=repo_dir, env=env, check=True)
         
-        commit_proc = subprocess.run(
-            ["git", "commit", "-m", f"Checkpoint {last_id} [skip ci]"],
-            cwd=repo_dir, env=env
-        )
+        commit_proc = subprocess.run(["git", "commit", "-m", f"Checkpoint {last_id} [skip ci]"], cwd=repo_dir, env=env)
         
         if commit_proc.returncode == 0:
             push_proc = subprocess.run(["git", "push"], cwd=repo_dir, env=env)
@@ -409,6 +408,7 @@ def slugify_for_ia(text, max_len=80):
     return (text.lower() or "item")[:max_len]
 
 def upload_to_archive_org(file_path, bucket_hint, key_hint, content_type="application/x-subrip", extension="srt", wait_seconds=60):
+    time.sleep(2)  # Be nice to Archive.org to prevent 503 SlowDown
     bucket = slugify_for_ia(f"beamplay-subs-{bucket_hint}")
     key = slugify_for_ia(key_hint) + f".{extension}"
     upload_url = f"https://s3.us.archive.org/{bucket}/{key}"
@@ -460,16 +460,22 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
         srt_path = os.path.join(TEMP_FOLDER, f"{tmp_prefix}_sub{idx}.srt")
         sup_path = os.path.join(TEMP_FOLDER, f"{tmp_prefix}_sub{idx}.sup")
         srt_err_msg = None
+        
+        # 1. Try Direct SRT Extraction
         try:
             extract_subtitle_to_srt(source_path, sub["stream_index"], srt_path)
-            hosted = host_subtitle_everywhere(srt_path, bucket_hint, f"{tmp_prefix}_sub{idx}")
-            candidates.append({"hosts": hosted, "format": "srt"})
+            try:
+                hosted = host_subtitle_everywhere(srt_path, bucket_hint, f"{tmp_prefix}_sub{idx}")
+                candidates.append({"hosts": hosted, "format": "srt"})
+            except Exception as host_err:
+                failures.append(f"track #{idx+1}: srt extracted but hosting failed ({host_err})")
             srt_overrides[sub["stream_index"]] = srt_path
             continue
         except Exception as e:
             srt_err_msg = str(e)
             safe_delete(srt_path)
 
+        # 2. Try OCR (if direct extraction fails)
         if not whole_file_ocr_tried:
             whole_file_ocr_tried = True
             try:
@@ -479,26 +485,33 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
                 whole_file_ocr_srt = srt_path
             except Exception as e:
                 whole_file_ocr_error = str(e)
-        elif whole_file_ocr_srt:
+        elif whole_file_ocr_srt and os.path.exists(whole_file_ocr_srt):
             shutil.copy(whole_file_ocr_srt, srt_path)
 
         if whole_file_ocr_srt and os.path.exists(srt_path):
             try:
                 hosted = host_subtitle_everywhere(srt_path, bucket_hint, f"{tmp_prefix}_sub{idx}")
                 candidates.append({"hosts": hosted, "format": "srt (OCR)"})
-                srt_overrides[sub["stream_index"]] = srt_path
-                continue
             except Exception as host_err:
-                safe_delete(srt_path)
                 failures.append(f"track #{idx+1}: OCR succeeded but hosting failed ({host_err})")
-                continue
+            srt_overrides[sub["stream_index"]] = srt_path
+            continue
 
-        try:
-            extract_subtitle_raw_copy(source_path, sub["stream_index"], sup_path)
-            hosted = host_subtitle_everywhere(sup_path, bucket_hint, f"{tmp_prefix}_sub{idx}", content_type="application/octet-stream", extension="sup")
-            candidates.append({"hosts": hosted, "format": "sup (OCR failed, raw)"})
-        except Exception as raw_err:
-            failures.append(f"track #{idx+1}: srt failed ({srt_err_msg}); OCR failed ({whole_file_ocr_error}); raw backup failed ({raw_err})")
+        # 3. Try Raw Image Backup (if OCR fails)
+        fmt = sub.get("format", "").lower()
+        codec = sub.get("codec", "").lower()
+        if any(s in fmt or s in codec for s in ["pgs", "pgssub", "hdmv", "vobsub", "dvd_subtitle"]):
+            try:
+                extract_subtitle_raw_copy(source_path, sub["stream_index"], sup_path)
+                try:
+                    hosted = host_subtitle_everywhere(sup_path, bucket_hint, f"{tmp_prefix}_sub{idx}", content_type="application/octet-stream", extension="sup")
+                    candidates.append({"hosts": hosted, "format": "sup (OCR failed, raw)"})
+                except Exception as host_err:
+                    failures.append(f"track #{idx+1}: raw sup extracted but hosting failed ({host_err})")
+            except Exception as raw_err:
+                failures.append(f"track #{idx+1}: srt failed ({srt_err_msg}); OCR failed ({whole_file_ocr_error}); raw backup failed ({raw_err})")
+        else:
+            failures.append(f"track #{idx+1}: srt failed ({srt_err_msg}); OCR failed ({whole_file_ocr_error}); skipped raw backup (not image based)")
         finally:
             safe_delete(sup_path)
 
@@ -574,7 +587,6 @@ async def process_row(client, row):
     links_table = "movie_links" if content_type == "movie" else "episode_links"
     id_column = "movie_id" if content_type == "movie" else "episode_id"
     
-    # Fetch ALL links for this movie/episode and filter in Python to avoid SQL formatting mismatches
     all_existing_links = turso_query_all(f"SELECT quality, audio_languages FROM {links_table} WHERE {id_column} = ?", [content_id])
     done_langs = set()
     
@@ -583,23 +595,18 @@ async def process_row(client, row):
     for link_row in all_existing_links:
         db_q = (link_row.get("quality") or "").lower()
         db_langs_raw = link_row.get("audio_languages") or "[]"
-        print(f"  [DEBUG] DB Link found: quality='{db_q}', langs={db_langs_raw}")
-        
         if db_q == base_quality:
             for l in json.loads(db_langs_raw):
                 done_langs.add(l)
             
     print(f"  Already Done: {list(done_langs)}")
     
-    # Get declared languages from download_files
     declared_langs = json.loads(row["audio_languages"] or "[]")
     if not declared_langs:
         declared_langs = ["Unknown"]
         
-    # Calculate what is actually missing
     missing_langs = [l for l in declared_langs if l not in done_langs]
     
-    # --- THE FIXED SKIP LOGIC ---
     if not missing_langs:
         print(f"  All declared languages already done. Skipping bot & download.")
         save_checkpoint(df_id)
@@ -638,9 +645,13 @@ async def process_row(client, row):
             season = ep_data["season_number"]
             episode = ep_data["episode_number"]
 
+    # --- PROCESS SUBTITLES ONCE FOR THE WHOLE FILE ---
+    print(f"  Preparing subtitles (if any)...")
+    all_sub_candidates, all_sub_failures, sub_overrides = prepare_english_subtitle_urls(
+        temp_path, subtitle_tracks, f"{tmdb_id}", f"row{df_id}_{base_quality}"
+    )
+
     seen_langs = set()
-    all_sub_candidates = []
-    all_sub_failures = []
     
     for track in audio_tracks:
         lang = track["language"]
@@ -656,15 +667,7 @@ async def process_row(client, row):
         output_name = build_filename(content_type, title, year, season, episode, base_quality, lang)
         output_path = os.path.join(OUTPUT_FOLDER, output_name)
         
-        sub_candidates, sub_failures, sub_overrides = prepare_english_subtitle_urls(
-            temp_path, subtitle_tracks, f"{tmdb_id}", f"row{df_id}_{base_quality}"
-        )
-        all_sub_candidates.extend(sub_candidates)
-        all_sub_failures.extend(sub_failures)
-        
         remux_single_audio(temp_path, output_path, track, subtitle_tracks, sub_overrides)
-        
-        for p in sub_overrides.values(): safe_delete(p)
         
         print(f"  Uploading to Vidara: {output_name}")
         video_url, filecode = upload_to_vidara(output_path, output_name, folder_id)
@@ -680,6 +683,9 @@ async def process_row(client, row):
         print(f"  [OK] {lang} done.")
         
     safe_delete(temp_path)
+    
+    # Clean up subtitle temp files AFTER all audio tracks are processed
+    for p in sub_overrides.values(): safe_delete(p)
     
     if all_sub_candidates:
         print("\n" + "="*50)
