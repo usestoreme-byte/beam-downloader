@@ -7,13 +7,13 @@ import asyncio
 import requests
 import subprocess
 import time
-import logging # <--- ADDED
+import logging
 from pathlib import Path
 from pymediainfo import MediaInfo
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from telethon import TelegramClient, events
 
-# SILENCE TELETHON WARNINGS <--- ADDED
+# SILENCE TELETHON WARNINGS
 logging.getLogger('telethon').setLevel(logging.ERROR)
 
 # ============================================================================
@@ -510,10 +510,10 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
                     failures.append(f"track #{idx+1}: raw sup extracted but hosting failed ({host_err})")
             except Exception as raw_err:
                 failures.append(f"track #{idx+1}: srt failed ({srt_err_msg}); OCR failed ({whole_file_ocr_error}); raw backup failed ({raw_err})")
+            finally:
+                safe_delete(sup_path)
         else:
             failures.append(f"track #{idx+1}: srt failed ({srt_err_msg}); OCR failed ({whole_file_ocr_error}); skipped raw backup (not image based)")
-        finally:
-            safe_delete(sup_path)
 
     return candidates, failures, srt_overrides
 
