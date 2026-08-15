@@ -140,6 +140,14 @@ async def wait_for_bot_reply(client, bot_username, target_regex, timeout=90):
         await asyncio.wait_for(future, timeout=timeout)
         return future.result()
     except asyncio.TimeoutError:
+        # Fetch last message from bot to debug why it failed
+        try:
+            msgs = await client.get_messages(bot_username, limit=1)
+            if msgs and len(msgs) > 0:
+                text = msgs[0].text or "(no text)"
+                print(f"  [DEBUG] Timeout waiting for {bot_username}. Last message received: {text[:200]}")
+        except:
+            pass
         return None
     finally:
         client.remove_event_handler(handler)
@@ -519,7 +527,7 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
     return candidates, failures, srt_overrides
 
 # ============================================================================
-# VIDARA & DOWNLOAD
+# VIDARA & DOWNLOAD (RESUMABLE CHUNKED DOWNLOADER)
 # ============================================================================
 def fetch_vidara_upload_server():
     try:
@@ -551,45 +559,69 @@ def upload_to_vidara(file_path, custom_name, folder_id=None):
     if response.status_code == 200: return extract_vidara_urls(response.json())
     raise Exception(f"Vidara upload failed: {response.status_code} {response.text[:200]}")
 
-def download_file(url, dest_path, max_retries=3):
+def download_file(url, dest_path, max_retries=5):
     for attempt in range(1, max_retries + 1):
         print(f"  Download attempt {attempt}/{max_retries}...")
-        # Optimized aria2c parameters
-        cmd = [
-            "aria2c", "-x", "16", "-s", "16", "-j", "1", "-k", "1M",
-            "--file-allocation=none", "--summary-interval=0", "--retry-wait=3",
-            "--max-tries=5", "--timeout=60", "--connect-timeout=30",
-            "--auto-file-renaming=false", "--allow-overwrite=true",
-            "--disable-ipv6=true", "--max-connection-per-server=16",
-            "--min-split-size=1M", "--user-agent=Mozilla/5.0",
-            "--check-certificate=false",  # Bypass cert issues on GitHub
-            "-d", os.path.dirname(dest_path), "-o", os.path.basename(dest_path), url
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
-        if result.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024:
-            return True
-            
-        # Capture actual aria2c output to see why it failed
-        err_msg = result.stdout[-500:] if result.stdout else (result.stderr[-500:] if result.stderr else "unknown error")
-        print(f"  [WARN] aria2c failed (attempt {attempt}): {err_msg}")
-        safe_delete(dest_path)
-        
-        # Fallback to requests
-        print(f"  Falling back to direct stream (attempt {attempt})...")
         try:
-            # Extended timeout: 30s to connect, 300s (5 min) to read between chunks
-            with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
+            # Some servers block HEAD requests, so we try GET with stream=True and close it immediately
+            with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 60)) as r:
                 r.raise_for_status()
-                with open(dest_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        if chunk: f.write(chunk)
-            if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024:
-                return True
-            print(f"  [WARN] Direct stream resulted in small/empty file.")
+                file_size = int(r.headers.get("Content-Length", 0))
+                supports_range = r.headers.get("Accept-Ranges", "").lower() == "bytes"
         except Exception as e:
-            print(f"  [WARN] Direct stream failed: {e}")
+            print(f"  [WARN] Could not get headers: {e}")
+            file_size = 0
+            supports_range = False
+
+        if file_size > 0 and supports_range:
+            print(f"  Server supports Range requests. File size: {file_size / 1048576:.2f} MB. Downloading in chunks...")
+            chunk_size = 20 * 1024 * 1024  # 20MB chunks
+            downloaded = 0
+            if os.path.exists(dest_path):
+                downloaded = os.path.getsize(dest_path)
+                if downloaded > file_size:
+                    safe_delete(dest_path)
+                    downloaded = 0
             
+            while downloaded < file_size:
+                start = downloaded
+                end = min(downloaded + chunk_size - 1, file_size - 1)
+                headers = {"User-Agent": "Mozilla/5.0", "Range": f"bytes={start}-{end}"}
+                try:
+                    r = requests.get(url, headers=headers, stream=True, timeout=(30, 300))
+                    r.raise_for_status()
+                    with open(dest_path, 'ab') as f:
+                        for data in r.iter_content(chunk_size=1024*1024):
+                            if data:
+                                f.write(data)
+                                downloaded += len(data)
+                    print(f"    Downloaded {downloaded / 1048576:.2f} MB / {file_size / 1048576:.2f} MB", end='\r')
+                except Exception as e:
+                    print(f"\n  [WARN] Chunk failed at {downloaded / 1048576:.2f} MB: {e}. Retrying chunk in 5s...")
+                    time.sleep(5)
+                    continue
+            
+            if os.path.exists(dest_path) and os.path.getsize(dest_path) == file_size:
+                print("\n  Chunked download complete.")
+                return True
+            else:
+                print("\n  [WARN] Chunked download failed. File size mismatch.")
+                safe_delete(dest_path)
+        else:
+            # Fallback to direct stream
+            print(f"  Server does not support Range or no file size. Falling back to direct stream...")
+            try:
+                with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
+                    r.raise_for_status()
+                    with open(dest_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 1024):
+                            if chunk: f.write(chunk)
+                if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024:
+                    return True
+                print(f"  [WARN] Direct stream resulted in small/empty file.")
+            except Exception as e:
+                print(f"  [WARN] Direct stream failed: {e}")
+                
         safe_delete(dest_path)
         if attempt < max_retries:
             time.sleep(5)
