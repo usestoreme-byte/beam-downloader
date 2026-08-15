@@ -30,9 +30,11 @@ SESSION_BASE64 = os.environ.get("TG_SESSION_BASE64")
 
 PRIVATE_CHANNEL_ID = -1004446192375  # YOUR NEW CHANNEL ID
 
-F2L_BOT_USERNAME = 'AV_F2L_BOT'
+# Bots
 LCU_BOT_USERNAME = 'LCU_Filetolinkbot'
 LINK_STREAMER_BOT = 'linkstreamerbot'
+LINK_FILES_BOT = 'LinkFilesBot'
+F2L_BOT_USERNAME = 'AV_F2L_BOT'
 
 CHECKPOINT_FILE = "state.json"
 FOLDERS_FILE = "folders.json"
@@ -140,14 +142,12 @@ async def wait_for_bot_reply(client, bot_username, target_regex, timeout=90):
         await asyncio.wait_for(future, timeout=timeout)
         return future.result()
     except asyncio.TimeoutError:
-        # Fetch last message from bot to debug why it failed
         try:
             msgs = await client.get_messages(bot_username, limit=1)
             if msgs and len(msgs) > 0:
                 text = msgs[0].text or "(no text)"
                 print(f"  [DEBUG] Timeout waiting for {bot_username}. Last message received: {text[:200]}")
-        except:
-            pass
+        except: pass
         return None
     finally:
         client.remove_event_handler(handler)
@@ -171,6 +171,33 @@ async def get_download_link_f2l(client, channel_msg_id):
         return None
     except Exception as e:
         print(f"  F2L Error: {e}")
+        return None
+
+async def get_download_link_linkfiles(client, channel_msg_id):
+    try:
+        await client.forward_messages(entity=LINK_FILES_BOT, messages=int(channel_msg_id), from_peer=PRIVATE_CHANNEL_ID)
+        reply_msg = await wait_for_bot_reply(client, LINK_FILES_BOT, r'clck\.ru', timeout=90)
+        if not reply_msg: return None
+        
+        text = reply_msg.raw_text or ""
+        
+        # Try to find the Download link specifically
+        match = re.search(r'Download:\s*(https?://clck\.ru/\S+)', text, re.IGNORECASE)
+        if not match:
+            match = re.search(r'(https?://clck\.ru/\S+)', text)
+            
+        if not match: return None
+        
+        short_link = match.group(1)
+        print(f"  LinkFilesBot short link: {short_link}")
+        
+        # Resolve short link
+        r = requests.head(short_link, allow_redirects=True, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        final_link = r.url
+        print(f"  Resolved to: {final_link}")
+        return final_link
+    except Exception as e:
+        print(f"  LinkFilesBot Error: {e}")
         return None
 
 async def get_download_link_lcu(client, channel_msg_id):
@@ -217,7 +244,13 @@ async def get_download_link(client, channel_msg_id):
         print(f"  LCU Link: {link}")
         return link
         
-    print("  LCU failed. Falling back to AV_F2L_BOT...")
+    print("  LCU failed. Falling back to @LinkFilesBot...")
+    link = await get_download_link_linkfiles(client, channel_msg_id)
+    if link:
+        print(f"  LinkFilesBot Link: {link}")
+        return link
+        
+    print("  LinkFilesBot failed. Falling back to @AV_F2L_BOT...")
     link = await get_download_link_f2l(client, channel_msg_id)
     print(f"  F2L Link: {link}")
     return link
@@ -527,7 +560,7 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
     return candidates, failures, srt_overrides
 
 # ============================================================================
-# VIDARA & DOWNLOAD (RESUMABLE CHUNKED DOWNLOADER)
+# VIDARA & DOWNLOAD
 # ============================================================================
 def fetch_vidara_upload_server():
     try:
@@ -559,11 +592,10 @@ def upload_to_vidara(file_path, custom_name, folder_id=None):
     if response.status_code == 200: return extract_vidara_urls(response.json())
     raise Exception(f"Vidara upload failed: {response.status_code} {response.text[:200]}")
 
-def download_file(url, dest_path, max_retries=5):
+def download_file_http(url, dest_path, max_retries=3):
     for attempt in range(1, max_retries + 1):
-        print(f"  Download attempt {attempt}/{max_retries}...")
+        print(f"  HTTP Download attempt {attempt}/{max_retries}...")
         try:
-            # Some servers block HEAD requests, so we try GET with stream=True and close it immediately
             with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 60)) as r:
                 r.raise_for_status()
                 file_size = int(r.headers.get("Content-Length", 0))
@@ -608,7 +640,6 @@ def download_file(url, dest_path, max_retries=5):
                 print("\n  [WARN] Chunked download failed. File size mismatch.")
                 safe_delete(dest_path)
         else:
-            # Fallback to direct stream
             print(f"  Server does not support Range or no file size. Falling back to direct stream...")
             try:
                 with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
@@ -679,12 +710,12 @@ async def process_row(client, row):
     
     link = await get_download_link(client, channel_msg_id)
     if not link:
-        raise Exception("Both F2L and LCU bots failed to return a link.")
+        raise Exception("All 3 bots (LCU, LinkFilesBot, F2L) failed to return a link.")
     
     temp_path = os.path.join(TEMP_FOLDER, f"row{df_id}_{base_quality}.mkv")
     print(f"  Downloading...")
-    if not download_file(link, temp_path):
-        raise Exception("Download failed after multiple retries.")
+    if not download_file_http(link, temp_path):
+        raise Exception("Download failed after multiple HTTP retries.")
         
     print(f"  Inspecting tracks...")
     audio_tracks, subtitle_tracks = inspect_tracks(temp_path, tmdb_id=tmdb_id)
