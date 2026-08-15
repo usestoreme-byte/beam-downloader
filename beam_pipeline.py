@@ -501,7 +501,6 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
         sup_path = os.path.join(TEMP_FOLDER, f"{tmp_prefix}_sub{idx}.sup")
         srt_err_msg = None
         
-        # 1. Try Direct SRT Extraction
         try:
             extract_subtitle_to_srt(source_path, sub["stream_index"], srt_path)
             try:
@@ -515,7 +514,6 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
             srt_err_msg = str(e)
             safe_delete(srt_path)
 
-        # 2. Try OCR (if direct extraction fails)
         if not whole_file_ocr_tried:
             whole_file_ocr_tried = True
             try:
@@ -537,7 +535,6 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
             srt_overrides[sub["stream_index"]] = srt_path
             continue
 
-        # 3. Try Raw Image Backup (if OCR fails)
         fmt = sub.get("format", "").lower()
         codec = sub.get("codec", "").lower()
         if any(s in fmt or s in codec for s in ["pgs", "pgssub", "hdmv", "vobsub", "dvd_subtitle"]):
@@ -558,7 +555,7 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
     return candidates, failures, srt_overrides
 
 # ============================================================================
-# VIDARA & DOWNLOAD (SMART DOWNLOADER)
+# VIDARA & DOWNLOAD (CLEAN LOGS)
 # ============================================================================
 def fetch_vidara_upload_server():
     try:
@@ -594,7 +591,7 @@ def download_file_http(url, dest_path, is_lcu=False, max_retries=3):
     for attempt in range(1, max_retries + 1):
         print(f"  HTTP Download attempt {attempt}/{max_retries}...")
         
-        # Step 1: If LCU link, try Fast Direct Stream first (No chunking overhead)
+        # Step 1: If LCU link, try Fast Direct Stream first
         if is_lcu:
             try:
                 print("  Attempting fast direct stream (LCU)...")
@@ -603,23 +600,25 @@ def download_file_http(url, dest_path, is_lcu=False, max_retries=3):
                     file_size = int(r.headers.get("Content-Length", 0))
                     with open(dest_path, 'wb') as f:
                         downloaded = 0
+                        last_printed = 0
                         for chunk in r.iter_content(chunk_size=1024 * 1024):
                             if chunk:
                                 f.write(chunk)
                                 downloaded += len(chunk)
-                                if file_size > 0:
-                                    print(f"    Downloaded {downloaded / 1048576:.2f} MB / {file_size / 1048576:.2f} MB", end='\r')
-                print()
+                                # Print cleanly every 100MB
+                                if file_size > 0 and downloaded - last_printed >= 100 * 1024 * 1024:
+                                    print(f"    Downloaded {downloaded / 1048576:.0f} MB / {file_size / 1048576:.0f} MB")
+                                    last_printed = downloaded
                 if os.path.exists(dest_path) and (file_size == 0 or os.path.getsize(dest_path) == file_size):
                     print("  Direct stream complete.")
                     return True
                 print("  [WARN] Direct stream failed. File size mismatch.")
                 safe_delete(dest_path)
             except Exception as e:
-                print(f"\n  [WARN] Direct stream failed: {e}")
+                print(f"  [WARN] Direct stream failed: {e}")
                 safe_delete(dest_path)
                 
-        # Step 2: Fallback to 20MB Chunked Download (for Cloudflare >1GB limits or non-LCU links)
+        # Step 2: Fallback to 20MB Chunked Download
         print("  Falling back to 20MB chunked download...")
         try:
             with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 60)) as r:
@@ -635,6 +634,7 @@ def download_file_http(url, dest_path, is_lcu=False, max_retries=3):
             print(f"  Server supports Range requests. File size: {file_size / 1048576:.2f} MB. Downloading in chunks...")
             chunk_size = 20 * 1024 * 1024  # 20MB chunks
             downloaded = 0
+            last_printed = 0
             if os.path.exists(dest_path):
                 downloaded = os.path.getsize(dest_path)
                 if downloaded > file_size:
@@ -653,7 +653,10 @@ def download_file_http(url, dest_path, is_lcu=False, max_retries=3):
                             if data:
                                 f.write(data)
                                 downloaded += len(data)
-                    print(f"    Downloaded {downloaded / 1048576:.2f} MB / {file_size / 1048576:.2f} MB", end='\r')
+                                # Print cleanly every 100MB
+                                if downloaded - last_printed >= 100 * 1024 * 1024:
+                                    print(f"    Downloaded {downloaded / 1048576:.0f} MB / {file_size / 1048576:.0f} MB")
+                                    last_printed = downloaded
                 except Exception as e:
                     print(f"\n  [WARN] Chunk failed at {downloaded / 1048576:.2f} MB: {e}. Retrying chunk in 5s...")
                     time.sleep(5)
