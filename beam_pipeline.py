@@ -240,18 +240,18 @@ async def get_download_link(client, channel_msg_id):
     link = await get_download_link_lcu(client, channel_msg_id)
     if link:
         print(f"  LCU Link: {link}")
-        return link, True  # True = is_lcu link (use fast stream)
+        return link, True  # True = is_lcu link (use fast aria2c)
         
     print("  LCU failed. Falling back to @LinkFilesBot...")
     link = await get_download_link_linkfiles(client, channel_msg_id)
     if link:
         print(f"  LinkFilesBot Link: {link}")
-        return link, False # False = use chunked download
+        return link, True # True = use fast aria2c
         
     print("  LinkFilesBot failed. Falling back to @AV_F2L_BOT...")
     link = await get_download_link_f2l(client, channel_msg_id)
     print(f"  F2L Link: {link}")
-    return link, False
+    return link, False # False = use chunked download (Cloudflare)
 
 # ============================================================================
 # STATE FILES (IMMEDIATE GIT PUSH - BULLETPROOF)
@@ -555,7 +555,7 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
     return candidates, failures, srt_overrides
 
 # ============================================================================
-# VIDARA & DOWNLOAD (CLEAN LOGS)
+# VIDARA & DOWNLOAD (ULTRA FAST ARIA2C + CLOUDFLARE BYPASS)
 # ============================================================================
 def fetch_vidara_upload_server():
     try:
@@ -587,52 +587,56 @@ def upload_to_vidara(file_path, custom_name, folder_id=None):
     if response.status_code == 200: return extract_vidara_urls(response.json())
     raise Exception(f"Vidara upload failed: {response.status_code} {response.text[:200]}")
 
-def download_file_http(url, dest_path, is_lcu=False, max_retries=3):
+def download_file_aria2c(url, dest_path):
+    print("  Attempting ultra-fast aria2c download (16 connections)...")
+    cmd = [
+        "aria2c", 
+        "-x", "16", 
+        "-s", "16", 
+        "-j", "16", 
+        "-k", "1M",
+        "--file-allocation=none", 
+        "--summary-interval=0", 
+        "--console-log-level=warn",
+        "--download-result=hide",
+        "--retry-wait=3", 
+        "--max-tries=5", 
+        "--timeout=60", 
+        "--connect-timeout=30",
+        "--auto-file-renaming=false", 
+        "--allow-overwrite=true",
+        "--disable-ipv6=true", 
+        "--max-connection-per-server=16",
+        "--min-split-size=1M", 
+        "--user-agent=Mozilla/5.0",
+        "-d", os.path.dirname(dest_path), 
+        "-o", os.path.basename(dest_path), 
+        url
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024:
+        print("  aria2c download complete.")
+        return True
+    print(f"  [WARN] aria2c failed: {result.stderr[-300:] if result.stderr else 'unknown error'}")
+    safe_delete(dest_path)
+    return False
+
+def download_file_chunked(url, dest_path, max_retries=3):
     for attempt in range(1, max_retries + 1):
-        print(f"  HTTP Download attempt {attempt}/{max_retries}...")
-        
-        # Step 1: If LCU link, try Fast Direct Stream first
-        if is_lcu:
-            try:
-                print("  Attempting fast direct stream (LCU)...")
-                with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
-                    r.raise_for_status()
-                    file_size = int(r.headers.get("Content-Length", 0))
-                    with open(dest_path, 'wb') as f:
-                        downloaded = 0
-                        last_printed = 0
-                        for chunk in r.iter_content(chunk_size=1024 * 1024):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                # Print cleanly every 100MB
-                                if file_size > 0 and downloaded - last_printed >= 100 * 1024 * 1024:
-                                    print(f"    Downloaded {downloaded / 1048576:.0f} MB / {file_size / 1048576:.0f} MB")
-                                    last_printed = downloaded
-                if os.path.exists(dest_path) and (file_size == 0 or os.path.getsize(dest_path) == file_size):
-                    print("  Direct stream complete.")
-                    return True
-                print("  [WARN] Direct stream failed. File size mismatch.")
-                safe_delete(dest_path)
-            except Exception as e:
-                print(f"  [WARN] Direct stream failed: {e}")
-                safe_delete(dest_path)
-                
-        # Step 2: Fallback to 20MB Chunked Download
-        print("  Falling back to 20MB chunked download...")
+        print(f"  Cloudflare bypass attempt {attempt}/{max_retries}...")
         try:
             with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 60)) as r:
                 r.raise_for_status()
                 file_size = int(r.headers.get("Content-Length", 0))
                 supports_range = r.headers.get("Accept-Ranges", "").lower() == "bytes"
         except Exception as e:
-            print(f"  [WARN] Could not get headers for chunking: {e}")
+            print(f"  [WARN] Could not get headers: {e}")
             file_size = 0
             supports_range = False
 
         if file_size > 0 and supports_range:
-            print(f"  Server supports Range requests. File size: {file_size / 1048576:.2f} MB. Downloading in chunks...")
-            chunk_size = 20 * 1024 * 1024  # 20MB chunks
+            print(f"  Server supports Range requests. File size: {file_size / 1048576:.2f} MB. Downloading in 20MB chunks...")
+            chunk_size = 20 * 1024 * 1024
             downloaded = 0
             last_printed = 0
             if os.path.exists(dest_path):
@@ -653,7 +657,6 @@ def download_file_http(url, dest_path, is_lcu=False, max_retries=3):
                             if data:
                                 f.write(data)
                                 downloaded += len(data)
-                                # Print cleanly every 100MB
                                 if downloaded - last_printed >= 100 * 1024 * 1024:
                                     print(f"    Downloaded {downloaded / 1048576:.0f} MB / {file_size / 1048576:.0f} MB")
                                     last_printed = downloaded
@@ -675,6 +678,15 @@ def download_file_http(url, dest_path, is_lcu=False, max_retries=3):
             time.sleep(5)
             
     return False
+
+def download_file_http(url, dest_path, is_lcu=False):
+    # Step 1: If LCU or LinkFilesBot, use aria2c for maximum speed
+    if is_lcu:
+        if download_file_aria2c(url, dest_path):
+            return True
+            
+    # Step 2: Fallback to 20MB Chunked Download (for Cloudflare/F2L links or if aria2c fails)
+    return download_file_chunked(url, dest_path)
 
 def safe_delete(path):
     try:
