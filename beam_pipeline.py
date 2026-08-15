@@ -9,6 +9,7 @@ import subprocess
 import time
 import logging
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from pymediainfo import MediaInfo
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from telethon import TelegramClient, events
@@ -550,19 +551,46 @@ def upload_to_vidara(file_path, custom_name, folder_id=None):
     if response.status_code == 200: return extract_vidara_urls(response.json())
     raise Exception(f"Vidara upload failed: {response.status_code} {response.text[:200]}")
 
-def download_file(url, dest_path):
-    cmd = ["aria2c", "-x", "16", "-s", "16", "-j", "16", "-k", "1M", "--file-allocation=none", "--summary-interval=0", "--retry-wait=5", "--max-tries=8", "--timeout=45", "--connect-timeout=15", "--auto-file-renaming=false", "--disable-ipv6=true", "--max-connection-per-server=16", "--min-split-size=1M", "--user-agent=Mozilla/5.0", "-d", os.path.dirname(dest_path), "-o", os.path.basename(dest_path), url]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    if result.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024: return True
-    try:
-        if os.path.exists(dest_path): os.remove(dest_path)
-        with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(dest_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    if chunk: f.write(chunk)
-        return os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024
-    except: return False
+def download_file(url, dest_path, max_retries=3):
+    for attempt in range(1, max_retries + 1):
+        print(f"  Download attempt {attempt}/{max_retries}...")
+        # Optimized aria2c parameters for speed
+        cmd = [
+            "aria2c", "-x", "16", "-s", "16", "-j", "1", "-k", "1M",
+            "--file-allocation=none", "--summary-interval=0", "--retry-wait=3",
+            "--max-tries=5", "--timeout=60", "--connect-timeout=30",
+            "--auto-file-renaming=false", "--allow-overwrite=true",
+            "--disable-ipv6=true", "--max-connection-per-server=16",
+            "--min-split-size=1M", "--user-agent=Mozilla/5.0",
+            "-d", os.path.dirname(dest_path), "-o", os.path.basename(dest_path), url
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        
+        if result.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024:
+            return True
+            
+        print(f"  [WARN] aria2c failed (attempt {attempt}): {result.stderr[-300:] if result.stderr else 'unknown error'}")
+        safe_delete(dest_path)
+        
+        # Fallback to requests
+        print(f"  Falling back to direct stream (attempt {attempt})...")
+        try:
+            with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                with open(dest_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk: f.write(chunk)
+            if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024:
+                return True
+            print(f"  [WARN] Direct stream resulted in small/empty file.")
+        except Exception as e:
+            print(f"  [WARN] Direct stream failed: {e}")
+            
+        safe_delete(dest_path)
+        if attempt < max_retries:
+            time.sleep(5)
+            
+    return False
 
 def safe_delete(path):
     try:
@@ -591,7 +619,6 @@ async def process_row(client, row):
     done_langs = set()
     
     print(f"\n*** PROCESSING: {file_name} ***")
-    print(f"  [DEBUG] Base Quality parsed as: '{base_quality}'")
     for link_row in all_existing_links:
         db_q = (link_row.get("quality") or "").lower()
         db_langs_raw = link_row.get("audio_languages") or "[]"
@@ -621,7 +648,7 @@ async def process_row(client, row):
     temp_path = os.path.join(TEMP_FOLDER, f"row{df_id}_{base_quality}.mkv")
     print(f"  Downloading...")
     if not download_file(link, temp_path):
-        raise Exception("Download failed.")
+        raise Exception("Download failed after multiple retries.")
         
     print(f"  Inspecting tracks...")
     audio_tracks, subtitle_tracks = inspect_tracks(temp_path, tmdb_id=tmdb_id)
@@ -652,14 +679,16 @@ async def process_row(client, row):
     )
 
     seen_langs = set()
+    tasks_to_upload = []
     
+    # 1. PRE-REMUX ALL LANGUAGES INSTANTLY
     for track in audio_tracks:
         lang = track["language"]
         if lang in done_langs or lang in seen_langs:
             print(f"  Skipping {lang} (already processed)")
             continue
             
-        print(f"  Processing language: {lang}")
+        print(f"  Remuxing language: {lang}")
         
         if content_type == "episode" and folder_id is None:
             folder_id = get_or_create_vidara_folder(title, season, base_quality)
@@ -668,19 +697,31 @@ async def process_row(client, row):
         output_path = os.path.join(OUTPUT_FOLDER, output_name)
         
         remux_single_audio(temp_path, output_path, track, subtitle_tracks, sub_overrides)
-        
-        print(f"  Uploading to Vidara: {output_name}")
-        video_url, filecode = upload_to_vidara(output_path, output_name, folder_id)
-        safe_delete(output_path)
-        
-        print(f"  Inserting into DB: {video_url}")
-        turso_execute(
-            f"INSERT INTO {links_table} ({id_column}, url, quality, audio_languages, created_at) VALUES (?, ?, ?, ?, ?)",
-            [content_id, video_url, base_quality, json.dumps([lang]), int(time.time())]
-        )
-        
+        tasks_to_upload.append({"path": output_path, "name": output_name, "lang": lang})
         seen_langs.add(lang)
-        print(f"  [OK] {lang} done.")
+
+    # 2. UPLOAD ALL LANGUAGES IN PARALLEL
+    if tasks_to_upload:
+        print(f"  Uploading {len(tasks_to_upload)} language(s) to Vidara in parallel...")
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = []
+            for item in tasks_to_upload:
+                futures.append(executor.submit(upload_to_vidara, item["path"], item["name"], folder_id))
+            
+            for i, future in enumerate(futures):
+                item = tasks_to_upload[i]
+                try:
+                    video_url, filecode = future.result()
+                    print(f"  Inserting into DB: {video_url} ({item['lang']})")
+                    turso_execute(
+                        f"INSERT INTO {links_table} ({id_column}, url, quality, audio_languages, created_at) VALUES (?, ?, ?, ?, ?)",
+                        [content_id, video_url, base_quality, json.dumps([item["lang"]]), int(time.time())]
+                    )
+                    print(f"  [OK] {item['lang']} done.")
+                except Exception as e:
+                    print(f"  [ERROR] Upload/DB failed for {item['lang']}: {e}")
+                finally:
+                    safe_delete(item["path"])
         
     safe_delete(temp_path)
     
