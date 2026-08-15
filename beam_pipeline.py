@@ -181,7 +181,6 @@ async def get_download_link_linkfiles(client, channel_msg_id):
         
         text = reply_msg.raw_text or ""
         
-        # Try to find the Download link specifically
         match = re.search(r'Download:\s*(https?://clck\.ru/\S+)', text, re.IGNORECASE)
         if not match:
             match = re.search(r'(https?://clck\.ru/\S+)', text)
@@ -191,7 +190,6 @@ async def get_download_link_linkfiles(client, channel_msg_id):
         short_link = match.group(1)
         print(f"  LinkFilesBot short link: {short_link}")
         
-        # Resolve short link
         r = requests.head(short_link, allow_redirects=True, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         final_link = r.url
         print(f"  Resolved to: {final_link}")
@@ -242,18 +240,18 @@ async def get_download_link(client, channel_msg_id):
     link = await get_download_link_lcu(client, channel_msg_id)
     if link:
         print(f"  LCU Link: {link}")
-        return link
+        return link, True  # True = is_lcu link (use fast stream)
         
     print("  LCU failed. Falling back to @LinkFilesBot...")
     link = await get_download_link_linkfiles(client, channel_msg_id)
     if link:
         print(f"  LinkFilesBot Link: {link}")
-        return link
+        return link, False # False = use chunked download
         
     print("  LinkFilesBot failed. Falling back to @AV_F2L_BOT...")
     link = await get_download_link_f2l(client, channel_msg_id)
     print(f"  F2L Link: {link}")
-    return link
+    return link, False
 
 # ============================================================================
 # STATE FILES (IMMEDIATE GIT PUSH - BULLETPROOF)
@@ -592,35 +590,36 @@ def upload_to_vidara(file_path, custom_name, folder_id=None):
     if response.status_code == 200: return extract_vidara_urls(response.json())
     raise Exception(f"Vidara upload failed: {response.status_code} {response.text[:200]}")
 
-def download_file_http(url, dest_path, max_retries=3):
+def download_file_http(url, dest_path, is_lcu=False, max_retries=3):
     for attempt in range(1, max_retries + 1):
         print(f"  HTTP Download attempt {attempt}/{max_retries}...")
         
-        # Step 1: Try Fast Direct Stream first (No chunking overhead for LCU/LinkFilesBot)
-        try:
-            print("  Attempting fast direct stream...")
-            with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
-                r.raise_for_status()
-                file_size = int(r.headers.get("Content-Length", 0))
-                with open(dest_path, 'wb') as f:
-                    downloaded = 0
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if file_size > 0:
-                                print(f"    Downloaded {downloaded / 1048576:.2f} MB / {file_size / 1048576:.2f} MB", end='\r')
-            print()
-            if os.path.exists(dest_path) and (file_size == 0 or os.path.getsize(dest_path) == file_size):
-                print("  Direct stream complete.")
-                return True
-            print("  [WARN] Direct stream failed. File size mismatch.")
-            safe_delete(dest_path)
-        except Exception as e:
-            print(f"\n  [WARN] Direct stream failed: {e}")
-            safe_delete(dest_path)
-            
-        # Step 2: Fallback to 20MB Chunked Download (for Cloudflare >1GB limits)
+        # Step 1: If LCU link, try Fast Direct Stream first (No chunking overhead)
+        if is_lcu:
+            try:
+                print("  Attempting fast direct stream (LCU)...")
+                with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
+                    r.raise_for_status()
+                    file_size = int(r.headers.get("Content-Length", 0))
+                    with open(dest_path, 'wb') as f:
+                        downloaded = 0
+                        for chunk in r.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if file_size > 0:
+                                    print(f"    Downloaded {downloaded / 1048576:.2f} MB / {file_size / 1048576:.2f} MB", end='\r')
+                print()
+                if os.path.exists(dest_path) and (file_size == 0 or os.path.getsize(dest_path) == file_size):
+                    print("  Direct stream complete.")
+                    return True
+                print("  [WARN] Direct stream failed. File size mismatch.")
+                safe_delete(dest_path)
+            except Exception as e:
+                print(f"\n  [WARN] Direct stream failed: {e}")
+                safe_delete(dest_path)
+                
+        # Step 2: Fallback to 20MB Chunked Download (for Cloudflare >1GB limits or non-LCU links)
         print("  Falling back to 20MB chunked download...")
         try:
             with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 60)) as r:
@@ -723,13 +722,13 @@ async def process_row(client, row):
         
     print(f"  Missing Languages: {missing_langs}")
     
-    link = await get_download_link(client, channel_msg_id)
+    link, is_lcu = await get_download_link(client, channel_msg_id)
     if not link:
         raise Exception("All 3 bots (LCU, LinkFilesBot, F2L) failed to return a link.")
     
     temp_path = os.path.join(TEMP_FOLDER, f"row{df_id}_{base_quality}.mkv")
     print(f"  Downloading...")
-    if not download_file_http(link, temp_path):
+    if not download_file_http(link, temp_path, is_lcu=is_lcu):
         raise Exception("Download failed after multiple HTTP retries.")
         
     print(f"  Inspecting tracks...")
