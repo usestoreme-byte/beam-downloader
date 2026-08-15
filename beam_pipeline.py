@@ -554,7 +554,7 @@ def upload_to_vidara(file_path, custom_name, folder_id=None):
 def download_file(url, dest_path, max_retries=3):
     for attempt in range(1, max_retries + 1):
         print(f"  Download attempt {attempt}/{max_retries}...")
-        # Optimized aria2c parameters for speed
+        # Optimized aria2c parameters
         cmd = [
             "aria2c", "-x", "16", "-s", "16", "-j", "1", "-k", "1M",
             "--file-allocation=none", "--summary-interval=0", "--retry-wait=3",
@@ -562,20 +562,24 @@ def download_file(url, dest_path, max_retries=3):
             "--auto-file-renaming=false", "--allow-overwrite=true",
             "--disable-ipv6=true", "--max-connection-per-server=16",
             "--min-split-size=1M", "--user-agent=Mozilla/5.0",
+            "--check-certificate=false",  # Bypass cert issues on GitHub
             "-d", os.path.dirname(dest_path), "-o", os.path.basename(dest_path), url
         ]
-        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         if result.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024:
             return True
             
-        print(f"  [WARN] aria2c failed (attempt {attempt}): {result.stderr[-300:] if result.stderr else 'unknown error'}")
+        # Capture actual aria2c output to see why it failed
+        err_msg = result.stdout[-500:] if result.stdout else (result.stderr[-500:] if result.stderr else "unknown error")
+        print(f"  [WARN] aria2c failed (attempt {attempt}): {err_msg}")
         safe_delete(dest_path)
         
         # Fallback to requests
         print(f"  Falling back to direct stream (attempt {attempt})...")
         try:
-            with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=60) as r:
+            # Extended timeout: 30s to connect, 300s (5 min) to read between chunks
+            with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
                 r.raise_for_status()
                 with open(dest_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=1024 * 1024):
