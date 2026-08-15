@@ -560,7 +560,7 @@ def prepare_english_subtitle_urls(source_path, subtitle_tracks, bucket_hint, tmp
     return candidates, failures, srt_overrides
 
 # ============================================================================
-# VIDARA & DOWNLOAD
+# VIDARA & DOWNLOAD (SMART DOWNLOADER)
 # ============================================================================
 def fetch_vidara_upload_server():
     try:
@@ -595,13 +595,40 @@ def upload_to_vidara(file_path, custom_name, folder_id=None):
 def download_file_http(url, dest_path, max_retries=3):
     for attempt in range(1, max_retries + 1):
         print(f"  HTTP Download attempt {attempt}/{max_retries}...")
+        
+        # Step 1: Try Fast Direct Stream first (No chunking overhead for LCU/LinkFilesBot)
+        try:
+            print("  Attempting fast direct stream...")
+            with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
+                r.raise_for_status()
+                file_size = int(r.headers.get("Content-Length", 0))
+                with open(dest_path, 'wb') as f:
+                    downloaded = 0
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if file_size > 0:
+                                print(f"    Downloaded {downloaded / 1048576:.2f} MB / {file_size / 1048576:.2f} MB", end='\r')
+            print()
+            if os.path.exists(dest_path) and (file_size == 0 or os.path.getsize(dest_path) == file_size):
+                print("  Direct stream complete.")
+                return True
+            print("  [WARN] Direct stream failed. File size mismatch.")
+            safe_delete(dest_path)
+        except Exception as e:
+            print(f"\n  [WARN] Direct stream failed: {e}")
+            safe_delete(dest_path)
+            
+        # Step 2: Fallback to 20MB Chunked Download (for Cloudflare >1GB limits)
+        print("  Falling back to 20MB chunked download...")
         try:
             with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 60)) as r:
                 r.raise_for_status()
                 file_size = int(r.headers.get("Content-Length", 0))
                 supports_range = r.headers.get("Accept-Ranges", "").lower() == "bytes"
         except Exception as e:
-            print(f"  [WARN] Could not get headers: {e}")
+            print(f"  [WARN] Could not get headers for chunking: {e}")
             file_size = 0
             supports_range = False
 
@@ -640,20 +667,8 @@ def download_file_http(url, dest_path, max_retries=3):
                 print("\n  [WARN] Chunked download failed. File size mismatch.")
                 safe_delete(dest_path)
         else:
-            print(f"  Server does not support Range or no file size. Falling back to direct stream...")
-            try:
-                with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=(30, 300)) as r:
-                    r.raise_for_status()
-                    with open(dest_path, 'wb') as f:
-                        for chunk in r.iter_content(chunk_size=1024 * 1024):
-                            if chunk: f.write(chunk)
-                if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024 * 1024:
-                    return True
-                print(f"  [WARN] Direct stream resulted in small/empty file.")
-            except Exception as e:
-                print(f"  [WARN] Direct stream failed: {e}")
+            print("  [WARN] Cannot chunk (no file size or range support).")
                 
-        safe_delete(dest_path)
         if attempt < max_retries:
             time.sleep(5)
             
