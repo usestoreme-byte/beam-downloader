@@ -372,19 +372,19 @@ def remux_single_audio(source_path, output_path, audio_track, subtitle_tracks, s
             override_input_idx[sub["stream_index"]] = next_input
             next_input += 1
 
-    cmd += ["-map", "0:v:0", "-map", f"0:a:{audio_track['stream_index']}"]
+    # Use 0:V? (strict video, optional) to avoid crashes if video stream is missing or named weirdly
+    cmd += ["-map", "0:V?", "-map", f"0:a:{int(audio_track['stream_index'])}"]
     mapped_subs = []
     for sub in subtitle_tracks:
         if sub["stream_index"] in override_input_idx:
             mapped_subs.append(sub)
             cmd += ["-map", f"{override_input_idx[sub['stream_index']]}:0"]
-            cmd += [f"-c:s:{len(mapped_subs)-1}", "copy"]
         else:
             fmt = sub.get("format", "").lower()
             codec = sub.get("codec", "").lower()
             if not any(s in fmt or s in codec for s in ["subrip", "srt", "utf-8", "ass", "ssa", "pgs", "pgssub", "hdmv", "vobsub", "dvd_subtitle", "s_text", "s_hdmv"]): continue
             mapped_subs.append(sub)
-            cmd += ["-map", f"0:s:{sub['stream_index']}"]
+            cmd += ["-map", f"0:s:{int(sub['stream_index'])}"]
 
     cmd += ["-c", "copy", "-map_chapters", "-1"]
     cmd += ["-metadata:s:a:0", f"language={iso3_for_language(audio_track['language'])}"]
