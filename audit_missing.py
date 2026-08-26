@@ -50,9 +50,9 @@ def turso_query_all(sql, args=[]):
 # MAIN AUDIT LOGIC
 # ============================================================================
 def main():
-    print("=" * 60)
-    print("BEAM AUDIT SCRIPT - FINDING MISSING LANGUAGES")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("BEAM AUDIT SCRIPT - FINDING MISSING LANGUAGES", flush=True)
+    print("=" * 60, flush=True)
 
     if not os.environ.get("GOOGLE_SHEETS_JSON"):
         raise ValueError("GOOGLE_SHEETS_JSON secret is missing!")
@@ -69,17 +69,15 @@ def main():
         return
 
     # 1. Fetch ALL expected files from download_files
-    print("Fetching expected files from download_files...")
+    print("Fetching expected files from download_files...", flush=True)
     expected_files = turso_query_all("SELECT id, content_type, content_id, tmdb_id, quality, audio_languages FROM download_files")
     
-    # Group expected languages by (content_type, content_id, base_quality)
     expected_map = {}
     for f in expected_files:
         content_type = f["content_type"]
         content_id = f["content_id"]
         raw_quality = f["quality"] or ""
         
-        # Extract base quality (e.g., "1080p" from "1080p WEB-DL")
         q_match = re.search(r'(2160p|1080p|720p|480p|360p)', raw_quality, re.IGNORECASE)
         base_quality = q_match.group(1).lower() if q_match else raw_quality.lower()
         
@@ -93,10 +91,10 @@ def main():
             for l in langs:
                 expected_map[key].add(l)
         except:
-            pass # Ignore broken JSON
+            pass
 
-    # 2. Fetch ALL actual links from movie_links and episode_links
-    print("Fetching actual links from DB...")
+    # 2. Fetch ALL actual links
+    print("Fetching actual links from DB...", flush=True)
     actual_movie_links = turso_query_all("SELECT movie_id, quality, audio_languages FROM movie_links")
     actual_episode_links = turso_query_all("SELECT episode_id, quality, audio_languages FROM episode_links")
     
@@ -119,14 +117,13 @@ def main():
         except: pass
 
     # 3. Calculate the Gaps
-    print("Calculating missing languages...")
+    print("Calculating missing languages...", flush=True)
     missing_records = []
     
     for key, expected_langs in expected_map.items():
         content_type, content_id, base_quality = key
         actual_langs = actual_map.get(key, set())
         
-        # Find what is in expected but not in actual
         missing_langs = expected_langs - actual_langs
         
         if missing_langs:
@@ -138,15 +135,14 @@ def main():
                 "expected_langs": ", ".join(sorted(list(expected_langs)))
             })
 
-    # 4. Fetch Clean Names (Titles, Seasons, Episodes) for the missing records
-    print(f"Found {len(missing_records)} missing entries. Fetching clean names...")
+    # 4. Fetch Clean Names
+    print(f"Found {len(missing_records)} missing entries. Fetching clean names...", flush=True)
     
     movie_ids = list(set([r["content_id"] for r in missing_records if r["content_type"] == "movie"]))
     episode_ids = list(set([r["content_id"] for r in missing_records if r["content_type"] == "episode"]))
 
     movies_map = {}
     if movie_ids:
-        # Fetch movie titles
         placeholders = ",".join(["?" for _ in movie_ids])
         m_data = turso_query_all(f"SELECT id, title, release_year, tmdb_id FROM movies WHERE id IN ({placeholders})", movie_ids)
         for m in m_data:
@@ -154,7 +150,6 @@ def main():
 
     episodes_map = {}
     if episode_ids:
-        # Fetch episode titles + series info
         placeholders = ",".join(["?" for _ in episode_ids])
         ep_data = turso_query_all(f"""
             SELECT e.id, e.episode_number, e.season_id, s.season_number, ser.title AS series_title, ser.tmdb_id AS series_tmdb_id
@@ -175,9 +170,7 @@ def main():
                 "Movie",
                 m.get("tmdb_id", "?"),
                 m.get("title", "Unknown Movie"),
-                "-", # Season
-                "-", # Episode
-                r["quality"],
+                "-", "-", r["quality"],
                 r["expected_langs"],
                 r["missing_langs"]
             ])
@@ -194,18 +187,22 @@ def main():
                 r["missing_langs"]
             ])
 
-    # 6. Write to Google Sheets (Clear first to avoid duplicates)
-    print(f"Writing {len(sheet_rows)} rows to Google Sheets...")
+    # 6. Write to Google Sheets (Safely clear and rewrite)
+    print(f"Writing {len(sheet_rows)} rows to Google Sheets...", flush=True)
     
-    # Clear existing data (except the header row in A1)
-    worksheet.clear(start_row=2, start_col=1, end_row=worksheet.row_count, end_col=8)
+    # Safely clear the entire sheet first
+    worksheet.clear()
+    
+    # Rewrite the header row
+    header = ["Type", "TMDB ID", "Title", "Season", "Episode", "Quality", "Declared Languages", "Missing Languages"]
+    worksheet.update([header], "A1")
     
     if sheet_rows:
-        # Append all missing records at once
+        # Append all missing records at once starting at A2
         worksheet.append_rows(sheet_rows, value_input_option="USER_ENTERED", table_range="A2")
-        print(f"✅ Successfully updated sheet with {len(sheet_rows)} missing records.")
+        print(f"✅ Successfully updated sheet with {len(sheet_rows)} missing records.", flush=True)
     else:
-        print("✅ Sheet updated. No missing languages found! Everything is complete.")
+        print("✅ Sheet updated. No missing languages found! Everything is complete.", flush=True)
 
 if __name__ == "__main__":
     main()
