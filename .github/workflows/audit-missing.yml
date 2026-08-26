@@ -1,7 +1,7 @@
 name: Audit Missing Languages
 
 on:
-  workflow_dispatch: # Allows you to run it manually whenever you want
+  workflow_dispatch:
 
 jobs:
   run-audit:
@@ -21,6 +21,7 @@ jobs:
 
       - name: Run Audit Script
         env:
+          PYTHONUNBUFFERED: 1  # <-- This makes logs show up live
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
